@@ -7,9 +7,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -27,8 +30,9 @@ import (
 //
 // [relayManager] methods can be called by [Conn] and [endpoint] while their .mu
 // mutexes are held. Therefore, in order to avoid deadlocks, [relayManager] must
-// never attempt to acquire those mutexes, including synchronous calls back
-// towards [Conn] or [endpoint] methods that acquire them.
+// never attempt to acquire those mutexes synchronously from its runLoop(),
+// including synchronous calls back towards [Conn] or [endpoint] methods that
+// acquire them.
 type relayManager struct {
 	initOnce sync.Once
 
@@ -581,7 +585,35 @@ func (r *relayManager) handleNewServerEndpointRunLoop(newServerEndpoint newRelay
 	byServerDisco[newServerEndpoint.se.ServerDisco] = work
 	r.handshakeWorkByServerDiscoVNI[sdv] = work
 
+	if newServerEndpoint.server.IsValid() {
+		// Send CallMeMaybeVia to the remote peer if we allocated this endpoint.
+		go r.sendCallMeMaybeVia(work.ep, work.se)
+	}
+
 	go r.handshakeServerEndpoint(work)
+}
+
+// sendCallMeMaybeVia sends a [disco.CallMeMaybeVia] to ep over DERP. It must be
+// called as part of a goroutine independent from runLoop(), for 2 reasons:
+//  1. it acquires ep.mu (refer to [relayManager] docs for reasoning)
+//  2. it makes a networking syscall, which can introduce unwanted backpressure
+func (r *relayManager) sendCallMeMaybeVia(ep *endpoint, se udprelay.ServerEndpoint) {
+	ep.mu.Lock()
+	derpAddr := ep.derpAddr
+	ep.mu.Unlock()
+	epDisco := ep.disco.Load()
+	if epDisco == nil || !derpAddr.IsValid() {
+		return
+	}
+	callMeMaybeVia := &disco.CallMeMaybeVia{
+		ServerDisco:         se.ServerDisco,
+		LamportID:           se.LamportID,
+		VNI:                 se.VNI,
+		BindLifetime:        se.BindLifetime.Duration,
+		SteadyStateLifetime: se.SteadyStateLifetime.Duration,
+		AddrPorts:           se.AddrPorts,
+	}
+	ep.c.sendDiscoMessage(epAddr{ap: derpAddr}, ep.publicKey, epDisco.key, callMeMaybeVia, discoVerboseLog)
 }
 
 func (r *relayManager) handshakeServerEndpoint(work *relayHandshakeWork) {
@@ -691,7 +723,6 @@ func (r *relayManager) handshakeServerEndpoint(work *relayHandshakeWork) {
 				// unexpected message type, silently discard
 				continue
 			}
-			return
 		case <-timer.C:
 			// The handshake timed out.
 			return
@@ -712,51 +743,91 @@ func (r *relayManager) allocateAllServersRunLoop(ep *endpoint) {
 	r.allocWorkByEndpoint[ep] = started
 	go func() {
 		started.wg.Wait()
-		started.cancel()
 		relayManagerInputEvent(r, ctx, &r.allocateWorkDoneCh, relayEndpointAllocWorkDoneEvent{work: started})
+		// cleanup context cancellation must come after the
+		// relayManagerInputEvent call, otherwise it returns early without
+		// writing the event to runLoop().
+		started.cancel()
 	}()
+}
+
+type errNotReady struct{ retryAfter time.Duration }
+
+func (e errNotReady) Error() string {
+	return fmt.Sprintf("server not ready, retry after %v", e.retryAfter)
+}
+
+const reqTimeout = time.Second * 10
+
+func doAllocate(ctx context.Context, server netip.AddrPort, discoKeys [2]key.DiscoPublic) (udprelay.ServerEndpoint, error) {
+	var reqBody bytes.Buffer
+	type allocateRelayEndpointReq struct {
+		DiscoKeys []key.DiscoPublic
+	}
+	a := &allocateRelayEndpointReq{
+		DiscoKeys: []key.DiscoPublic{discoKeys[0], discoKeys[1]},
+	}
+	err := json.NewEncoder(&reqBody).Encode(a)
+	if err != nil {
+		return udprelay.ServerEndpoint{}, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, reqTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, httpm.POST, "http://"+server.String()+"/v0/relay/endpoint", &reqBody)
+	if err != nil {
+		return udprelay.ServerEndpoint{}, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return udprelay.ServerEndpoint{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var se udprelay.ServerEndpoint
+		err = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&se)
+		return se, err
+	case http.StatusServiceUnavailable:
+		raHeader := resp.Header.Get("Retry-After")
+		raSeconds, err := strconv.ParseUint(raHeader, 10, 32)
+		if err == nil {
+			return udprelay.ServerEndpoint{}, errNotReady{retryAfter: time.Second * time.Duration(raSeconds)}
+		}
+		fallthrough
+	default:
+		return udprelay.ServerEndpoint{}, fmt.Errorf("non-200 status: %d", resp.StatusCode)
+	}
 }
 
 func (r *relayManager) allocateSingleServer(ctx context.Context, wg *sync.WaitGroup, server netip.AddrPort, ep *endpoint) {
 	// TODO(jwhited): introduce client metrics counters for notable failures
 	defer wg.Done()
-	var b bytes.Buffer
 	remoteDisco := ep.disco.Load()
 	if remoteDisco == nil {
 		return
 	}
-	type allocateRelayEndpointReq struct {
-		DiscoKeys []key.DiscoPublic
-	}
-	a := &allocateRelayEndpointReq{
-		DiscoKeys: []key.DiscoPublic{ep.c.discoPublic, remoteDisco.key},
-	}
-	err := json.NewEncoder(&b).Encode(a)
-	if err != nil {
+	firstTry := true
+	for {
+		se, err := doAllocate(ctx, server, [2]key.DiscoPublic{ep.c.discoPublic, remoteDisco.key})
+		if err == nil {
+			relayManagerInputEvent(r, ctx, &r.newServerEndpointCh, newRelayServerEndpointEvent{
+				ep:     ep,
+				se:     se,
+				server: server, // we allocated this endpoint (vs CallMeMaybeVia reception), mark it as such
+			})
+			return
+		}
+		ep.c.logf("[v1] magicsock: relayManager: error allocating endpoint on %v for %v: %v", server, ep.discoShort(), err)
+		var notReady errNotReady
+		if firstTry && errors.As(err, &notReady) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(min(notReady.retryAfter, reqTimeout)):
+				firstTry = false
+				continue
+			}
+		}
 		return
 	}
-	const reqTimeout = time.Second * 10
-	reqCtx, cancel := context.WithTimeout(ctx, reqTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, httpm.POST, "http://"+server.String()+"/v0/relay/endpoint", &b)
-	if err != nil {
-		return
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-	var se udprelay.ServerEndpoint
-	err = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&se)
-	if err != nil {
-		return
-	}
-	relayManagerInputEvent(r, ctx, &r.newServerEndpointCh, newRelayServerEndpointEvent{
-		ep: ep,
-		se: se,
-	})
 }
