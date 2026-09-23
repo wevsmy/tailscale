@@ -12,6 +12,7 @@ import (
 
 	"tailscale.com/ipn"
 	"tailscale.com/tailcfg"
+	"tailscale.com/tstest"
 	"tailscale.com/types/ipproto"
 	"tailscale.com/types/key"
 	"tailscale.com/types/netmap"
@@ -19,23 +20,26 @@ import (
 	"tailscale.com/wgengine/filter"
 )
 
-// waitFor blocks until the LocalBackend's current netmap satisfies the given
-// function f. It uses a bus subscription to wake up on netmap and peer-mutation
-// events rather than polling. Note: it has no timeout and should be called with
-// a ctx that has an appropriate timeout set.
+// waitFor blocks until a NetMap is seen on the IPN bus that satisfies the given
+// function f. Note: has no timeout, should be called with a ctx that has an
+// appropriate timeout set.
 func waitFor(t testing.TB, ctx context.Context, s *Server, f func(*netmap.NetworkMap) bool) error {
 	t.Helper()
-	w, err := s.localClient.WatchIPNBus(ctx, ipn.NotifyInitialState|ipn.NotifyPeerChanges)
+	watcher, err := s.localClient.WatchIPNBus(ctx, ipn.NotifyInitialNetMap)
 	if err != nil {
-		return fmt.Errorf("watching IPN bus: %w", err)
+		t.Fatalf("error watching IPN bus: %s", err)
 	}
-	defer w.Close()
+	defer watcher.Close()
+
 	for {
-		if nm := s.lb.NetMapWithPeers(); nm != nil && f(nm) {
-			return nil
+		n, err := watcher.Next()
+		if err != nil {
+			return fmt.Errorf("getting next ipn.Notify from IPN bus: %w", err)
 		}
-		if _, err := w.Next(); err != nil {
-			return fmt.Errorf("waiting for netmap: %w", err)
+		if n.NetMap != nil {
+			if f(n.NetMap) {
+				return nil
+			}
 		}
 	}
 }
@@ -44,6 +48,7 @@ func waitFor(t testing.TB, ctx context.Context, s *Server, f func(*netmap.Networ
 // netmaps and turning them into packet filters together. Only the control-plane
 // side is mocked out.
 func TestPacketFilterFromNetmap(t *testing.T) {
+	tstest.Shard(t)
 	t.Parallel()
 
 	var key key.NodePublic
@@ -187,7 +192,7 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 			controlURL, c := startControl(t)
 			s, _, pubKey := startServer(t, ctx, controlURL, "node")
 
-			if test.waitTest(s.lb.NetMapWithPeers()) {
+			if test.waitTest(s.lb.NetMap()) {
 				t.Fatal("waitTest already passes before sending initial netmap: this will be flaky")
 			}
 
@@ -199,7 +204,7 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 				t.Fatalf("waitFor: %s", err)
 			}
 
-			pf := s.lb.ForTest().GetFilter()
+			pf := s.lb.GetFilterForTest()
 
 			for _, check := range test.checks {
 				got := pf.Check(netip.MustParseAddr(check.src), netip.MustParseAddr(check.dst), check.port, ipproto.TCP)
@@ -218,7 +223,7 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 					t.Fatal("incrementalWaitTest must be set if incrementalMapResponse is set")
 				}
 
-				if test.incrementalWaitTest(s.lb.NetMapWithPeers()) {
+				if test.incrementalWaitTest(s.lb.NetMap()) {
 					t.Fatal("incrementalWaitTest already passes before sending incremental netmap: this will be flaky")
 				}
 
@@ -230,7 +235,7 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 					t.Fatalf("waitFor: %s", err)
 				}
 
-				pf := s.lb.ForTest().GetFilter()
+				pf := s.lb.GetFilterForTest()
 
 				for _, check := range test.checks {
 					got := pf.Check(netip.MustParseAddr(check.src), netip.MustParseAddr(check.dst), check.port, ipproto.TCP)

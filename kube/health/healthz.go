@@ -26,7 +26,6 @@ type Healthz struct {
 	sync.Mutex
 	hasAddrs bool
 	podIPv4  string
-	podIPv6  string
 	logger   logger.Logf
 }
 
@@ -35,12 +34,7 @@ func (h *Healthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer h.Unlock()
 
 	if h.hasAddrs {
-		if h.podIPv4 != "" {
-			w.Header().Set(kubetypes.PodIPv4Header, h.podIPv4)
-		}
-		if h.podIPv6 != "" {
-			w.Header().Set(kubetypes.PodIPv6Header, h.podIPv6)
-		}
+		w.Header().Add(kubetypes.PodIPv4Header, h.podIPv4)
 		if _, err := w.Write([]byte("ok")); err != nil {
 			http.Error(w, fmt.Sprintf("error writing status: %v", err), http.StatusInternalServerError)
 		}
@@ -80,10 +74,9 @@ func (h *Healthz) MonitorHealth(ctx context.Context, lc *local.Client) error {
 // RegisterHealthHandlers registers a simple health handler at /healthz.
 // A containerized tailscale instance is considered healthy if
 // it has at least one tailnet IP address.
-func RegisterHealthHandlers(mux *http.ServeMux, podIPv4, podIPv6 string, logger logger.Logf) *Healthz {
+func RegisterHealthHandlers(mux *http.ServeMux, podIPv4 string, logger logger.Logf) *Healthz {
 	h := &Healthz{
 		podIPv4: podIPv4,
-		podIPv6: podIPv6,
 		logger:  logger,
 	}
 	mux.Handle("GET /healthz", h)

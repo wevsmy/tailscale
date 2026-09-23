@@ -43,7 +43,12 @@ func (tb *tokenBucket) Get() bool {
 }
 
 func (tb *tokenBucket) Refund(n int) {
-	tb.remaining = min(tb.remaining+n, tb.max)
+	b := tb.remaining + n
+	if b > tb.max {
+		tb.remaining = tb.max
+	} else {
+		tb.remaining = b
+	}
 }
 
 func (tb *tokenBucket) AdvanceTo(t time.Time) {

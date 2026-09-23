@@ -18,7 +18,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -67,9 +66,48 @@ import (
 	"tailscale.com/wgengine/router"
 )
 
+// createTailscaleSymlink creates a 'tailscale' symlink pointing to the current
+// 'tailscaled' binary on Android, enabling the combined binary to work with both names.
+func createTailscaleSymlink() {
+	// Get the path to the current executable
+	execPath, err := os.Executable()
+	if err != nil {
+		return // Silently fail, not critical
+	}
+
+	// Resolve symlinks to get the real binary path
+	realPath, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		realPath = execPath // Fallback to execPath if symlink resolution fails
+	}
+
+	// Get the binary name and directory
+	binName := filepath.Base(realPath)
+	binDir := filepath.Dir(realPath)
+	symlinkPath := filepath.Join(binDir, "tailscale")
+
+	// Check if 'tailscale' already exists
+	if _, err := os.Lstat(symlinkPath); err == nil {
+		// File exists, check if it's already a symlink to us
+		if target, err := os.Readlink(symlinkPath); err == nil {
+			// It's a symlink, check if it points to our binary
+			if target == binName {
+				return // Already correctly set up
+			}
+		}
+		// Exists but not the right symlink, remove it
+		os.Remove(symlinkPath)
+	}
+
+	// Create the symlink: tailscale -> <actual binary name>
+	_ = os.Symlink(binName, symlinkPath)
+}
+
 // defaultTunName returns the default tun device name for the platform.
 func defaultTunName() string {
 	switch runtime.GOOS {
+	case "android":
+		return "tailscale0,userspace-networking"
 	case "openbsd":
 		return "tun"
 	case "windows":
@@ -87,16 +125,6 @@ func defaultTunName() string {
 			// Try TUN, but fall back to userspace networking if needed.
 			// See https://github.com/tailscale/tailscale-synology/issues/35
 			return "tailscale0,userspace-networking"
-		}
-		if buildfeatures.HasNetstack && distro.Get() == distro.Crostini {
-			// cros-garcon NULL-derefs on cold-boot netlink interface
-			// enumeration when tailscale0 is present, preventing the
-			// Crostini container and ChromeOS Terminal from starting
-			// cleanly. Default to userspace-networking until the
-			// upstream ChromiumOS bug is fixed.
-			// See https://github.com/tailscale/tailscale/issues/12090
-			// See https://issuetracker.google.com/issues/517069318
-			return "userspace-networking"
 		}
 	}
 	return "tailscale0"
@@ -142,8 +170,9 @@ var args struct {
 }
 
 var (
-	installSystemDaemon   func([]string) error // non-nil on some platforms
-	uninstallSystemDaemon func([]string) error // non-nil on some platforms
+	installSystemDaemon   func([]string) error                      // non-nil on some platforms
+	uninstallSystemDaemon func([]string) error                      // non-nil on some platforms
+	createBIRDClient      func(string) (wgengine.BIRDClient, error) // non-nil on some platforms
 )
 
 // Note - we use function pointers for subcommands so that subcommands like
@@ -183,12 +212,6 @@ var (
 	hookOutboundProxyListen        feature.Hook[func() proxyStartFunc]
 )
 
-// loadSyspolicy, if set, loads a JSON-file-backed syspolicy source after
-// command-line flags are parsed, using the path from --syspolicy-file. It
-// is set when built without ts_omit_syspolicy (see syspolicy.go), and
-// unset otherwise.
-var loadSyspolicy feature.Hook[func()]
-
 // proxyStartFunc is the type of the function returned by
 // outboundProxyListen, to start the servers on the Listeners
 // started by hookOutboundProxyListen.
@@ -196,6 +219,12 @@ type proxyStartFunc = func(logf logger.Logf, dialer *tsdial.Dialer)
 
 func main() {
 	envknob.PanicIfAnyEnvCheckedInInit()
+
+	// On Android, ensure 'tailscale' symlink exists for combined binary compatibility
+	if runtime.GOOS == "android" {
+		createTailscaleSymlink()
+	}
+
 	if shouldRunCLI() {
 		beCLI()
 		return
@@ -222,8 +251,8 @@ func main() {
 		flag.StringVar(&args.birdSocketPath, "bird-socket", "", "path of the bird unix socket")
 	}
 	flag.BoolVar(&printVersion, "version", false, "print version information and exit")
-	flag.BoolVar(&args.disableLogs, "no-logs-no-support", false, "disable log uploads; this also disables any technical support")
-	flag.StringVar(&args.confFile, "config", "", "path to config file, or 'vm:user-data' to use the VM's user-data (EC2); prefix with 'optional:' to boot unconfigured when the source is absent instead of failing")
+	flag.BoolVar(&args.disableLogs, "no-logs-no-support", true, "disable log uploads; this also disables any technical support")
+	flag.StringVar(&args.confFile, "config", "", "path to config file, or 'vm:user-data' to use the VM's user-data (EC2)")
 	if buildfeatures.HasTPM {
 		flag.Var(&args.hardwareAttestation, "hardware-attestation", `use hardware-backed keys to bind node identity to this device when supported
 by the OS and hardware. Uses TPM 2.0 on Linux and Windows; SecureEnclave on
@@ -231,9 +260,6 @@ macOS and iOS; and Keystore on Android. Only supported for Tailscale nodes that
 store state on filesystem.`)
 	}
 	if f, ok := hookRegisterOutboundProxyFlags.GetOk(); ok {
-		f()
-	}
-	if f, ok := feature.HookRegisterLogSinkFlags.GetOk(); ok {
 		f()
 	}
 
@@ -264,10 +290,6 @@ store state on filesystem.`)
 		}
 	}
 
-	if f, ok := feature.HookLogSink.GetOk(); ok {
-		f() // redirects the default logger (e.g. to syslog) if requested by flags
-	}
-
 	if fd, ok := envknob.LookupInt("TS_PARENT_DEATH_FD"); ok && fd > 2 {
 		go dieOnPipeReadErrorOfFD(fd)
 	}
@@ -287,7 +309,7 @@ store state on filesystem.`)
 		log.Fatalf("--socket is required")
 	}
 
-	if buildfeatures.HasBird && args.birdSocketPath != "" && !wgengine.HookNewBird.IsSet() {
+	if buildfeatures.HasBird && args.birdSocketPath != "" && createBIRDClient == nil {
 		log.SetFlags(0)
 		log.Fatalf("--bird-socket is not supported on %s", runtime.GOOS)
 	}
@@ -306,12 +328,6 @@ store state on filesystem.`)
 		} else {
 			args.statepath = paths.DefaultTailscaledStateFile()
 		}
-	}
-
-	// If syspolicy is built in, load the JSON syspolicy file (if any) now
-	// so its settings are visible before anything queries them.
-	if f, ok := loadSyspolicy.GetOk(); ok {
-		f()
 	}
 
 	if buildfeatures.HasTPM {
@@ -438,24 +454,11 @@ func run() (err error) {
 	// Parse config, if specified, to fail early if it's invalid.
 	var conf *conffile.Config
 	if args.confFile != "" {
-		// An "optional:" prefix (e.g. "optional:vm:user-data") means it's fine
-		// for the config source to be absent: boot unconfigured and let the node
-		// be enrolled interactively instead of failing to start. A config that's
-		// present but invalid still fails, even when optional.
-		path := args.confFile
-		optional := false
-		if p, ok := strings.CutPrefix(path, "optional:"); ok {
-			optional, path = true, p
-		}
-		conf, err = conffile.Load(path)
-		switch {
-		case err == nil:
-			sys.InitialConfig = conf
-		case optional && errors.Is(err, conffile.ErrNoConfig):
-			logf("config: none present at %q; continuing unconfigured", path)
-		default:
+		conf, err = conffile.Load(args.confFile)
+		if err != nil {
 			return fmt.Errorf("error reading config file: %w", err)
 		}
+		sys.InitialConfig = conf
 	}
 
 	var netMon *netmon.Monitor
@@ -470,10 +473,6 @@ func run() (err error) {
 
 	var publicLogID logid.PublicID
 	if buildfeatures.HasLogTail {
-		logpolicy.GetLogTarget.Set(func() string {
-			target, _ := sys.PolicyClientOrDefault().GetString(pkey.LogTarget, "")
-			return target
-		})
 
 		pol := logpolicy.Options{
 			Collection: logtail.CollectionNode,
@@ -506,6 +505,9 @@ func run() (err error) {
 		return nil
 	}
 
+	if envknob.Bool("TS_DEBUG_MEMORY") {
+		logf = logger.RusagePrefixLog(logf)
+	}
 	logf = logger.RateLimitedFn(logf, 5*time.Second, 5, 100)
 
 	if envknob.Bool("TS_PLEASE_PANIC") {
@@ -714,12 +716,6 @@ func getLocalBackend(ctx context.Context, logf logger.Logf, logID logid.PublicID
 	if err != nil {
 		return nil, fmt.Errorf("ipnlocal.NewLocalBackend: %w", err)
 	}
-	if onlyNetstack {
-		dialer.UseNetstackForIP = func(ip netip.Addr) bool {
-			_, ok := lb.PeerForIP(ip)
-			return ok
-		}
-	}
 	lb.SetVarRoot(opts.VarRoot)
 	if logPol != nil {
 		lb.SetLogFlusher(logPol.Logtail.StartFlush)
@@ -810,8 +806,12 @@ func tryEngine(logf logger.Logf, sys *tsd.System, name string) (onlyNetstack boo
 	netstackSubnetRouter := onlyNetstack // but mutated later on some platforms
 	netns.SetEnabled(!onlyNetstack)
 
-	if buildfeatures.HasBird && args.birdSocketPath != "" {
-		conf.BIRDSocket = args.birdSocketPath
+	if args.birdSocketPath != "" && createBIRDClient != nil {
+		log.Printf("Connecting to BIRD at %s ...", args.birdSocketPath)
+		conf.BIRDClient, err = createBIRDClient(args.birdSocketPath)
+		if err != nil {
+			return false, fmt.Errorf("createBIRDClient: %w", err)
+		}
 	}
 	if onlyNetstack {
 		if runtime.GOOS == "linux" && distro.Get() == distro.Synology {
@@ -873,6 +873,7 @@ func tryEngine(logf logger.Logf, sys *tsd.System, name string) (onlyNetstack boo
 	if err != nil {
 		return onlyNetstack, err
 	}
+	e = wgengine.NewWatchdog(e)
 	sys.Set(e)
 	sys.NetstackRouter.Set(netstackSubnetRouter)
 
@@ -961,9 +962,7 @@ func handleTPMFlags() {
 	case !args.hardwareAttestation.set:
 		policyHWAttestation, _ := policyclient.Get().GetBoolean(pkey.HardwareAttestation, false)
 		if err := canUseHardwareAttestation(); err != nil {
-			if policyHWAttestation {
-				log.Printf("[unexpected] policy requires hardware attestation, but device does not support it: %v", err)
-			}
+			log.Printf("[unexpected] policy requires hardware attestation, but device does not support it: %v", err)
 			args.hardwareAttestation.v = false
 		} else {
 			args.hardwareAttestation.v = policyHWAttestation

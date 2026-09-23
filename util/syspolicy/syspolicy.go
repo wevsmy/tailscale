@@ -129,12 +129,8 @@ func getDuration(name pkey.Key, defaultValue time.Duration) (time.Duration, erro
 
 // registerChangeCallback adds a function that will be called whenever the effective policy
 // for the default scope changes. The returned function can be used to unregister the callback.
-func registerChangeCallback(uid string, cb rsop.PolicyChangeCallback) (unregister func(), err error) {
-	scope := setting.DefaultScope()
-	if uid != "" {
-		scope = setting.UserScopeOf(uid)
-	}
-	effective, err := rsop.PolicyFor(scope)
+func registerChangeCallback(cb rsop.PolicyChangeCallback) (unregister func(), err error) {
+	effective, err := rsop.PolicyFor(setting.DefaultScope())
 	if err != nil {
 		return nil, err
 	}
@@ -263,18 +259,6 @@ func (globalSyspolicy) HasAnyOf(keys ...pkey.Key) (bool, error) {
 	return hasAnyOf(keys...)
 }
 
-func (globalSyspolicy) RegisterChangeCallback(uid string, cb func(policyclient.PolicyChange)) (unregister func(), err error) {
-	return registerChangeCallback(uid, cb)
-}
-
-func (globalSyspolicy) GetPolicySnapshot(uid string) (*policyclient.PolicySnapshot, error) {
-	scope := setting.DefaultScope()
-	if uid != "" {
-		scope = setting.UserScopeOf(uid)
-	}
-	p, err := rsop.PolicyFor(scope)
-	if err != nil {
-		return nil, err
-	}
-	return p.Get(), nil
+func (globalSyspolicy) RegisterChangeCallback(cb func(policyclient.PolicyChange)) (unregister func(), err error) {
+	return registerChangeCallback(cb)
 }

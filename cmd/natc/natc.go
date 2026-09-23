@@ -20,7 +20,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -538,7 +537,12 @@ func (c *connector) ignoreDestination(dstAddrs []netip.Addr) bool {
 	if c.ignoreDsts == nil {
 		return false
 	}
-	return slices.ContainsFunc(dstAddrs, c.ignoreDsts.Contains)
+	for _, a := range dstAddrs {
+		if c.ignoreDsts.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 func proxyTCPConn(c net.Conn, dest string, ctor *connector) {

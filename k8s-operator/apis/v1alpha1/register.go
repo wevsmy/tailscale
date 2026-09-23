@@ -71,8 +71,6 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&TailnetList{},
 		&ProxyGroupPolicy{},
 		&ProxyGroupPolicyList{},
-		&PeerRelay{},
-		&PeerRelayList{},
 	)
 
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)

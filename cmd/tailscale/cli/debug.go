@@ -39,7 +39,6 @@ import (
 	"tailscale.com/net/ace"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/netmon"
-	"tailscale.com/net/netutil"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/net/tsdial"
 	"tailscale.com/paths"
@@ -258,7 +257,7 @@ func debugCmd() *ffcli.Command {
 				ShortHelp:  "Print prefs",
 				FlagSet: (func() *flag.FlagSet {
 					fs := newFlagSet("prefs")
-					fs.BoolVar(&prefsArgs.pretty, "pretty", false, "if true, pretty-print output")
+					fs.BoolVar(&prefsArgs.pretty, "pretty", false, "If true, pretty-print output")
 					return fs
 				})(),
 			},
@@ -269,19 +268,10 @@ func debugCmd() *ffcli.Command {
 				ShortHelp:  "Subscribe to IPN message bus",
 				FlagSet: (func() *flag.FlagSet {
 					fs := newFlagSet("watch-ipn")
-					fs.BoolVar(&watchIPNArgs.initial, "initial", false, "include the initial backend State and Prefs in the first message")
+					fs.BoolVar(&watchIPNArgs.netmap, "netmap", true, "include netmap in messages")
+					fs.BoolVar(&watchIPNArgs.initial, "initial", false, "include initial status")
+					fs.BoolVar(&watchIPNArgs.rateLimit, "rate-limit", true, "rate limit messages")
 					fs.IntVar(&watchIPNArgs.count, "count", 0, "exit after printing this many statuses, or 0 to keep going forever")
-					fs.BoolVar(&watchIPNArgs.engineUpdates, "engine-updates", false, "set NotifyWatchEngineUpdates: send Engine updates")
-					fs.BoolVar(&watchIPNArgs.initialDriveShares, "initial-drive-shares", false, "set NotifyInitialDriveShares: send current Taildrive Shares in first message")
-					fs.BoolVar(&watchIPNArgs.initialOutgoingFiles, "initial-outgoing-files", false, "set NotifyInitialOutgoingFiles: send current Taildrop OutgoingFiles in first message")
-					fs.BoolVar(&watchIPNArgs.initialHealthState, "initial-health", false, "set NotifyInitialHealthState: send current health.State in first message")
-					fs.BoolVar(&watchIPNArgs.healthActions, "health-actions", false, "set NotifyHealthActions: include PrimaryActions in health.State")
-					fs.BoolVar(&watchIPNArgs.initialSuggestedExitNode, "initial-suggested-exit-node", false, "set NotifyInitialSuggestedExitNode: send current SuggestedExitNode in first message")
-					fs.BoolVar(&watchIPNArgs.initialClientVersion, "initial-client-version", false, "set NotifyInitialClientVersion: send current ClientVersion in first message")
-					fs.BoolVar(&watchIPNArgs.peerChanges, "peer-changes", true, "set NotifyPeerChanges: send PeersChanged and PeersRemoved updates")
-					fs.BoolVar(&watchIPNArgs.initialStatus, "initial-status", false, "set NotifyInitialStatus: send current ipnstate.Status in first message")
-					fs.BoolVar(&watchIPNArgs.peerPatches, "peer-patches", true, "set NotifyPeerPatches: send narrow per-field peer patches")
-					fs.BoolVar(&watchIPNArgs.peerWireGuardState, "peer-wireguard-state", false, "set NotifyPeerWireGuardState: send WireGuard session state notifications")
 					return fs
 				})(),
 			},
@@ -642,59 +632,19 @@ func runPrefs(ctx context.Context, args []string) error {
 }
 
 var watchIPNArgs struct {
-	initial bool
-	count   int
-
-	engineUpdates            bool
-	initialDriveShares       bool
-	initialOutgoingFiles     bool
-	initialHealthState       bool
-	healthActions            bool
-	initialSuggestedExitNode bool
-	initialClientVersion     bool
-	peerChanges              bool
-	initialStatus            bool
-	peerPatches              bool
-	peerWireGuardState       bool
+	netmap    bool
+	initial   bool
+	rateLimit bool
+	count     int
 }
 
 func runWatchIPN(ctx context.Context, args []string) error {
-	mask := ipn.NotifyNoNetMap
+	var mask ipn.NotifyWatchOpt
 	if watchIPNArgs.initial {
-		mask |= ipn.NotifyInitialState | ipn.NotifyInitialPrefs
+		mask = ipn.NotifyInitialState | ipn.NotifyInitialPrefs | ipn.NotifyInitialNetMap
 	}
-	if watchIPNArgs.engineUpdates {
-		mask |= ipn.NotifyWatchEngineUpdates
-	}
-	if watchIPNArgs.initialDriveShares {
-		mask |= ipn.NotifyInitialDriveShares
-	}
-	if watchIPNArgs.initialOutgoingFiles {
-		mask |= ipn.NotifyInitialOutgoingFiles
-	}
-	if watchIPNArgs.initialHealthState {
-		mask |= ipn.NotifyInitialHealthState
-	}
-	if watchIPNArgs.healthActions {
-		mask |= ipn.NotifyHealthActions
-	}
-	if watchIPNArgs.initialSuggestedExitNode {
-		mask |= ipn.NotifyInitialSuggestedExitNode
-	}
-	if watchIPNArgs.initialClientVersion {
-		mask |= ipn.NotifyInitialClientVersion
-	}
-	if watchIPNArgs.peerChanges {
-		mask |= ipn.NotifyPeerChanges
-	}
-	if watchIPNArgs.initialStatus {
-		mask |= ipn.NotifyInitialStatus
-	}
-	if watchIPNArgs.peerPatches {
-		mask |= ipn.NotifyPeerPatches
-	}
-	if watchIPNArgs.peerWireGuardState {
-		mask |= ipn.NotifyPeerWireGuardState
+	if watchIPNArgs.rateLimit {
+		mask |= ipn.NotifyRateLimit
 	}
 	watcher, err := localClient.WatchIPNBus(ctx, mask)
 	if err != nil {
@@ -706,6 +656,9 @@ func runWatchIPN(ctx context.Context, args []string) error {
 		n, err := watcher.Next()
 		if err != nil {
 			return err
+		}
+		if !watchIPNArgs.netmap {
+			n.NetMap = nil
 		}
 		j, _ := json.MarshalIndent(n, "", "\t")
 		fmt.Printf("%s\n", j)
@@ -838,13 +791,10 @@ func runDaemonLogs(ctx context.Context, args []string) error {
 	}
 	d := json.NewDecoder(logs)
 	for {
-		type logtail struct {
-			Time string `json:"client_time"`
-		}
 		var line struct {
-			Text    string  `json:"text"`
-			Verbose int     `json:"v"`
-			Logtail logtail `json:"logtail"`
+			Text    string `json:"text"`
+			Verbose int    `json:"v"`
+			Time    string `json:"client_time"`
 		}
 		err := d.Decode(&line)
 		if err != nil {
@@ -854,8 +804,8 @@ func runDaemonLogs(ctx context.Context, args []string) error {
 		if line.Text == "" || line.Verbose > daemonLogsArgs.verbose {
 			continue
 		}
-		if daemonLogsArgs.time && line.Logtail.Time != "" {
-			fmt.Printf("%s %s\n", line.Logtail.Time, line.Text)
+		if daemonLogsArgs.time {
+			fmt.Printf("%s %s\n", line.Time, line.Text)
 		} else {
 			fmt.Println(line.Text)
 		}
@@ -1041,7 +991,7 @@ func runTS2021(ctx context.Context, args []string) error {
 
 	keysURL := "https://" + ts2021Args.host + "/key?v=" + strconv.Itoa(ts2021Args.version)
 
-	keyTransport := netutil.NewDefaultTransport()
+	keyTransport := http.DefaultTransport.(*http.Transport).Clone()
 	if ts2021Args.aceHost != "" {
 		log.Printf("using ACE server %q", ts2021Args.aceHost)
 		keyTransport.Proxy = nil

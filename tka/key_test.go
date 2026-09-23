@@ -72,8 +72,10 @@ func TestNLPrivate(t *testing.T) {
 	// Test that key.NLPrivate implements Signer by making a new
 	// authority.
 	k := Key{Kind: Key25519, Public: pub.Verifier(), Votes: 1}
-	state := CreateStateForTest(k)
-	_, aum, err := Create(ChonkMem(), state, p)
+	_, aum, err := Create(ChonkMem(), State{
+		Keys:              []Key{k},
+		DisablementValues: [][]byte{bytes.Repeat([]byte{1}, 32)},
+	}, p)
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}

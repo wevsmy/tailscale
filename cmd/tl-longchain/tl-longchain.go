@@ -45,7 +45,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	st, err := lc.TailnetLockStatus(ctx)
+	st, err := lc.NetworkLockStatus(ctx)
 	if err != nil {
 		log.Fatalf("could not get Tailnet Lock status: %v", err)
 	}

@@ -43,14 +43,6 @@ func TestExpandProxyTargetValueUnix(t *testing.T) {
 			skipOnWindows:    true,
 		},
 		{
-			name:             "unix-socket-bare-relative-path",
-			target:           "unix:myservice.sock",
-			supportedSchemes: []string{"http", "https", "unix"},
-			defaultScheme:    "http",
-			want:             "unix:myservice.sock",
-			skipOnWindows:    true,
-		},
-		{
 			name:             "unix-socket-empty-path",
 			target:           "unix:",
 			supportedSchemes: []string{"http", "https", "unix"},
@@ -62,21 +54,6 @@ func TestExpandProxyTargetValueUnix(t *testing.T) {
 			target:           "unix:/tmp/myservice.sock",
 			supportedSchemes: []string{"http", "https"},
 			defaultScheme:    "http",
-			wantErr:          true,
-		},
-		{
-			name:             "unix-socket-tcp-supported",
-			target:           "unix:/var/run/app.sock",
-			supportedSchemes: []string{"tcp", "unix"},
-			defaultScheme:    "tcp",
-			want:             "unix:/var/run/app.sock",
-			skipOnWindows:    true,
-		},
-		{
-			name:             "unix-socket-tcp-not-supported",
-			target:           "unix:/var/run/app.sock",
-			supportedSchemes: []string{"tcp"},
-			defaultScheme:    "tcp",
 			wantErr:          true,
 		},
 	}

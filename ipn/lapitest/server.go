@@ -195,7 +195,7 @@ func (s *Server) CheckCurrentUser(want ipnauth.Actor) {
 	if lb == nil {
 		s.tb.Fatalf("Backend: nil")
 	}
-	gotUID, gotActor := lb.ForTest().CurrentUser()
+	gotUID, gotActor := lb.CurrentUserForTest()
 	if gotUID != wantUID {
 		s.tb.Errorf("CurrentUser: got UID %q; want %q", gotUID, wantUID)
 	}

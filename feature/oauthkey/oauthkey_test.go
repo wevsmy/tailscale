@@ -9,8 +9,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"tailscale.com/internal/client/tailscale"
 )
 
 func TestResolveAuthKey(t *testing.T) {
@@ -82,10 +80,7 @@ func TestResolveAuthKey(t *testing.T) {
 				}
 			}
 
-			got, err := resolveAuthKey(context.Background(), tailscale.ResolveAuthKeyArgs{
-				AuthKey: tt.clientID,
-				Tags:    tt.tags,
-			})
+			got, err := resolveAuthKey(context.Background(), tt.clientID, tt.tags)
 
 			if tt.wantErr {
 				if err == nil {

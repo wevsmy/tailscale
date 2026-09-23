@@ -21,74 +21,22 @@ import (
 	"tailscale.com/types/bools"
 	"tailscale.com/types/ipproto"
 	"tailscale.com/types/netlogtype"
+	"tailscale.com/types/netmap"
 	"tailscale.com/wgengine/router"
 )
 
-// nodeAndUser pairs a [tailcfg.NodeView] with its owning user profile.
-type nodeAndUser struct {
-	node tailcfg.NodeView
-	user tailcfg.UserProfileView
-}
-
-// fakeNodeSource is a [NodeSource] implementation backed by static maps,
-// for tests.
-type fakeNodeSource struct {
-	self     tailcfg.NodeView
-	selfUser tailcfg.UserProfileView
-	byAddr   map[netip.Addr]nodeAndUser
-}
-
-func (s *fakeNodeSource) SelfNode() (tailcfg.NodeView, tailcfg.UserProfileView) {
-	return s.self, s.selfUser
-}
-
-func (s *fakeNodeSource) NodeByAddr(a netip.Addr) (_ tailcfg.NodeView, _ tailcfg.UserProfileView, ok bool) {
-	nu, ok := s.byAddr[a]
-	return nu.node, nu.user, ok
-}
-
-// newFakeNodeSource builds a [fakeNodeSource] from a self [tailcfg.NodeView],
-// a list of peer [tailcfg.NodeView] values, and a UserProfile map.
-// All single-IP addresses on self and the peers are indexed for NodeByAddr.
-func newFakeNodeSource(self tailcfg.NodeView, peers []tailcfg.NodeView, users map[tailcfg.UserID]tailcfg.UserProfileView) *fakeNodeSource {
-	s := &fakeNodeSource{
-		byAddr: map[netip.Addr]nodeAndUser{},
-	}
-	if self.Valid() {
-		s.self = self
-		s.selfUser = users[self.User()]
-		for _, p := range self.Addresses().All() {
-			if p.IsSingleIP() {
-				s.byAddr[p.Addr()] = nodeAndUser{self, s.selfUser}
-			}
-		}
-	}
-	for _, peer := range peers {
-		if !peer.Valid() {
-			continue
-		}
-		pu := users[peer.User()]
-		for _, p := range peer.Addresses().All() {
-			if p.IsSingleIP() {
-				s.byAddr[p.Addr()] = nodeAndUser{peer, pu}
-			}
-		}
-	}
-	return s
-}
-
 func TestEmbedNodeInfo(t *testing.T) {
-	// Initialize the logger with a particular view of the node state.
+	// Initialize the logger with a particular view of the netmap.
 	var logger Logger
-	logger.source = newFakeNodeSource(
-		(&tailcfg.Node{
+	logger.ReconfigNetworkMap(&netmap.NetworkMap{
+		SelfNode: (&tailcfg.Node{
 			StableID:  "n123456CNTL",
 			ID:        123456,
 			Name:      "test.tail123456.ts.net",
 			Addresses: []netip.Prefix{prefix("100.1.2.3")},
 			Tags:      []string{"tag:foo", "tag:bar"},
 		}).View(),
-		[]tailcfg.NodeView{
+		Peers: []tailcfg.NodeView{
 			(&tailcfg.Node{
 				StableID:  "n123457CNTL",
 				ID:        123457,
@@ -104,10 +52,10 @@ func TestEmbedNodeInfo(t *testing.T) {
 				User:      54321,
 			}).View(),
 		},
-		map[tailcfg.UserID]tailcfg.UserProfileView{
+		UserProfiles: map[tailcfg.UserID]tailcfg.UserProfileView{
 			54321: (&tailcfg.UserProfile{ID: 54321, LoginName: "peer@example.com"}).View(),
 		},
-	)
+	})
 	logger.ReconfigRoutes(&router.Config{
 		SubnetRoutes: []netip.Prefix{
 			prefix("172.16.1.1/16"),
@@ -200,9 +148,6 @@ func TestEmbedNodeInfo(t *testing.T) {
 
 func TestUpdateRace(t *testing.T) {
 	var logger Logger
-	// Install an empty fake source so NodeByAddr / SelfNode are exercised on
-	// the lookup path without returning any matches.
-	logger.source = &fakeNodeSource{}
 	logger.recordsChan = make(chan record, 1)
 	go func(recordsChan chan record) {
 		for range recordsChan {
@@ -220,6 +165,11 @@ func TestUpdateRace(t *testing.T) {
 				} else {
 					logger.updatePhysConn(0x1, src, dst, rand.IntN(10), rand.IntN(1000), j%2 == 0)
 				}
+			}
+		})
+		group.Go(func() {
+			for range 1000 {
+				logger.ReconfigNetworkMap(new(netmap.NetworkMap))
 			}
 		})
 		group.Go(func() {
@@ -244,7 +194,6 @@ func randAddrPort() netip.AddrPort {
 
 func TestAutoFlushMaxConns(t *testing.T) {
 	var logger Logger
-	logger.source = &fakeNodeSource{}
 	logger.recordsChan = make(chan record, 1)
 	for i := 0; len(logger.recordsChan) == 0; i++ {
 		logger.updateVirtConn(0, netip.AddrPortFrom(netip.Addr{}, uint16(i)), netip.AddrPort{}, 1, 1, false)
@@ -257,7 +206,6 @@ func TestAutoFlushMaxConns(t *testing.T) {
 
 func TestAutoFlushTimeout(t *testing.T) {
 	var logger Logger
-	logger.source = &fakeNodeSource{}
 	logger.recordsChan = make(chan record, 1)
 	synctest.Test(t, func(t *testing.T) {
 		logger.updateVirtConn(0, netip.AddrPort{}, netip.AddrPort{}, 1, 1, false)
@@ -274,7 +222,6 @@ func TestAutoFlushTimeout(t *testing.T) {
 
 func BenchmarkUpdateSameConn(b *testing.B) {
 	var logger Logger
-	logger.source = &fakeNodeSource{}
 	b.ReportAllocs()
 	for range b.N {
 		logger.updateVirtConn(0, netip.AddrPort{}, netip.AddrPort{}, 1, 1, false)
@@ -283,7 +230,6 @@ func BenchmarkUpdateSameConn(b *testing.B) {
 
 func BenchmarkUpdateNewConns(b *testing.B) {
 	var logger Logger
-	logger.source = &fakeNodeSource{}
 	b.ReportAllocs()
 	for i := range b.N {
 		logger.updateVirtConn(0, netip.AddrPortFrom(netip.Addr{}, uint16(i)), netip.AddrPort{}, 1, 1, false)

@@ -60,7 +60,6 @@ type Client struct {
 	DNSCache      *dnscache.Resolver // optional; nil means no caching
 	MeshKey       key.DERPMesh       // optional; for trusted clients
 	IsProber      bool               // optional; for probers to optional declare themselves as such
-	AppName       string             // optional; opaque app name to advertise to the server for stats
 
 	// WatchConnectionChanges is whether the client wishes to subscribe to
 	// notifications about clients connecting & disconnecting.
@@ -180,7 +179,7 @@ func NewClient(privateKey key.NodePrivate, serverURL string, logf logger.Logf, n
 
 // isStarted reports whether this client has been used yet.
 //
-// If it reports false, it may still have its exported fields configured.
+// If if reports false, it may still have its exported fields configured.
 func (c *Client) isStarted() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -281,16 +280,10 @@ func (c *Client) urlString(node *tailcfg.DERPNode) string {
 		return c.url.String()
 	}
 	proto := "https"
-	defaultPort := 443
 	if debugUseDERPHTTP() {
 		proto = "http"
-		defaultPort = 80
 	}
-	host := node.HostName
-	if node.DERPPort != 0 && node.DERPPort != defaultPort {
-		host = net.JoinHostPort(host, fmt.Sprint(node.DERPPort))
-	}
-	return fmt.Sprintf("%s://%s/derp", proto, host)
+	return fmt.Sprintf("%s://%s/derp", proto, node.HostName)
 }
 
 // AddressFamilySelector decides whether IPv6 is preferred for
@@ -414,7 +407,6 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
 			derp.MeshKey(c.MeshKey),
 			derp.CanAckPings(c.canAckPings),
 			derp.IsProber(c.IsProber),
-			derp.AppName(c.AppName),
 		)
 		if err != nil {
 			return nil, 0, err
@@ -560,7 +552,6 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
 		derp.ServerPublicKey(serverPub),
 		derp.CanAckPings(c.canAckPings),
 		derp.IsProber(c.IsProber),
-		derp.AppName(c.AppName),
 	)
 	if err != nil {
 		return nil, 0, err
@@ -876,15 +867,7 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
 		}
 	}()
 
-	// Keep port selection in sync with dialNode.
-	port := "443"
-	if !c.useHTTPS() {
-		port = "3340"
-	}
-	if n.DERPPort != 0 {
-		port = fmt.Sprint(n.DERPPort)
-	}
-	target := net.JoinHostPort(n.HostName, port)
+	target := net.JoinHostPort(n.HostName, "443")
 
 	var authHeader string
 	if buildfeatures.HasUseProxy {

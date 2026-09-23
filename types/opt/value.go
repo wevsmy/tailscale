@@ -105,11 +105,7 @@ func (o Value[T]) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if !o.set {
 		return enc.WriteToken(jsontext.Null)
 	}
-	// Pin v2 semantics so the wire format (e.g. nil slices as "[]",
-	// nil maps as "{}") stays the same even when this method is
-	// reached via encoding/json v1, which as of Go 1.27 dispatches
-	// here with v1 options that would otherwise leak into this call.
-	return jsonv2.MarshalEncode(enc, &o.value, jsonv2.DefaultOptionsV2())
+	return jsonv2.MarshalEncode(enc, &o.value)
 }
 
 // UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
@@ -120,8 +116,7 @@ func (o *Value[T]) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		return err
 	}
 	o.set = true
-	// Pin v2 semantics; see MarshalJSONTo.
-	return jsonv2.UnmarshalDecode(dec, &o.value, jsonv2.DefaultOptionsV2())
+	return jsonv2.UnmarshalDecode(dec, &o.value)
 }
 
 // MarshalJSON implements [json.Marshaler].

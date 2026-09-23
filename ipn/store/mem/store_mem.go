@@ -49,11 +49,7 @@ func (s *Store) WriteState(id ipn.StateKey, bs []byte) error {
 	if s.cache == nil {
 		s.cache = map[ipn.StateKey][]byte{}
 	}
-	if bs == nil {
-		delete(s.cache, id)
-	} else {
-		s.cache[id] = bytes.Clone(bs)
-	}
+	s.cache[id] = bytes.Clone(bs)
 	return nil
 }
 

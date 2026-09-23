@@ -628,7 +628,7 @@ func (e *serveEnv) runServeStatus(ctx context.Context, args []string) error {
 		return nil
 	}
 	printFunnelStatus(ctx)
-	if isServeConfigEmpty(sc) {
+	if sc == nil || (len(sc.TCP) == 0 && len(sc.Web) == 0 && len(sc.AllowFunnel) == 0) {
 		printf("No serve config\n")
 		return nil
 	}
@@ -636,8 +636,18 @@ func (e *serveEnv) runServeStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := printServeStatusTrees(sc, st); err != nil {
-		return err
+	if sc.IsTCPForwardingAny() {
+		if err := printTCPStatusTree(ctx, sc, st); err != nil {
+			return err
+		}
+		printf("\n")
+	}
+	for hp := range sc.Web {
+		err := e.printWebStatusTree(sc, hp)
+		if err != nil {
+			return err
+		}
+		printf("\n")
 	}
 	printFunnelWarning(sc)
 	return nil
@@ -650,95 +660,80 @@ func printTCPStatusTree(ctx context.Context, sc *ipn.ServeConfig, st *ipnstate.S
 			continue
 		}
 		hp := ipn.HostPort(net.JoinHostPort(dnsName, strconv.Itoa(int(p))))
+		tlsStatus := "TLS over TCP"
+		if h.TerminateTLS != "" {
+			tlsStatus = "TLS terminated"
+		}
 		fStatus := "tailnet only"
 		if sc.AllowFunnel[hp] {
 			fStatus = "Funnel on"
 		}
-		if h.TerminateTLS != "" {
-			printf("|-- tcp://%s (TLS-terminated TCP, %s)\n", hp, fStatus)
-		} else {
-			printf("|-- tcp://%s (%s)\n", hp, fStatus)
-		}
+		printf("|-- tcp://%s (%s, %s)\n", hp, tlsStatus, fStatus)
 		for _, a := range st.TailscaleIPs {
 			ipp := net.JoinHostPort(a.String(), strconv.Itoa(int(p)))
 			printf("|-- tcp://%s\n", ipp)
 		}
-		if strings.HasPrefix(h.TCPForward, "unix:") {
-			printf("|--> %s\n", h.TCPForward)
-		} else {
-			printf("|--> tcp://%s\n", h.TCPForward)
-		}
+		printf("|--> tcp://%s\n", h.TCPForward)
 	}
 	return nil
 }
 
-// printWebStatusTree renders one Web entry (the URL line plus its handler
-// tree) for either a node-level serve or a service-level serve. When
-// svcName is the empty string, the entry is treated as node-level. Service
-// entries include the service name in the URL annotation.
-//
-// funnel and https are computed by the caller from the parent ServeConfig
-// so this function does not need a reference to it.
-func printWebStatusTree(wsc *ipn.WebServerConfig, hp ipn.HostPort, funnel, https bool, svcName tailcfg.ServiceName) error {
-	if wsc == nil {
+func (e *serveEnv) printWebStatusTree(sc *ipn.ServeConfig, hp ipn.HostPort) error {
+	// No-op if no serve config
+	if sc == nil {
 		return nil
 	}
+	fStatus := "tailnet only"
+	if sc.AllowFunnel[hp] {
+		fStatus = "Funnel on"
+	}
 	host, portStr, _ := net.SplitHostPort(string(hp))
+
+	port, err := parseServePort(portStr)
+	if err != nil {
+		return fmt.Errorf("invalid port %q: %w", portStr, err)
+	}
+
 	scheme := "https"
-	if !https {
+	if sc.IsServingHTTP(port, noService) {
 		scheme = "http"
 	}
+
 	portPart := ":" + portStr
 	if scheme == "http" && portStr == "80" ||
 		scheme == "https" && portStr == "443" {
 		portPart = ""
 	}
-
-	fStatus := "tailnet only"
-	if funnel {
-		fStatus = "Funnel on"
+	if scheme == "http" {
+		hostname, _, _ := strings.Cut(host, ".")
+		printf("%s://%s%s (%s)\n", scheme, hostname, portPart, fStatus)
 	}
-	if svcName != "" {
-		printf("%s://%s%s (%s) (%s)\n", scheme, host, portPart, fStatus, svcName)
-	} else {
-		if scheme == "http" {
-			hostname, _, _ := strings.Cut(host, ".")
-			printf("%s://%s%s (%s)\n", scheme, hostname, portPart, fStatus)
+	printf("%s://%s%s (%s)\n", scheme, host, portPart, fStatus)
+	srvTypeAndDesc := func(h *ipn.HTTPHandler) (string, string) {
+		switch {
+		case h.Path != "":
+			return "path", h.Path
+		case h.Proxy != "":
+			return "proxy", h.Proxy
+		case h.Text != "":
+			return "text", "\"" + elipticallyTruncate(h.Text, 20) + "\""
 		}
-		printf("%s://%s%s (%s)\n", scheme, host, portPart, fStatus)
+		return "", ""
 	}
 
-	mounts := slicesx.MapKeys(wsc.Handlers)
-	if len(mounts) == 0 {
-		return nil
-	}
+	mounts := slicesx.MapKeys(sc.Web[hp].Handlers)
 	sort.Slice(mounts, func(i, j int) bool {
 		return len(mounts[i]) < len(mounts[j])
 	})
 	maxLen := len(mounts[len(mounts)-1])
 
 	for _, m := range mounts {
-		h := wsc.Handlers[m]
-		t, d := serveHandlerDesc(h)
+		h := sc.Web[hp].Handlers[m]
+		t, d := srvTypeAndDesc(h)
 		printf("%s %s%s %-5s %s\n", "|--", m, strings.Repeat(" ", maxLen-len(m)), t, d)
 	}
 
 	return nil
-}
-
-// serveHandlerDesc returns the type label and description for an
-// HTTPHandler, matching the format used by the Web tree printer for
-// node-level and service-level serves.
-func serveHandlerDesc(h *ipn.HTTPHandler) (string, string) {
-	switch {
-	case h.Path != "":
-		return "path", h.Path
-	case h.Proxy != "":
-		return "proxy", h.Proxy
-	case h.Text != "":
-		return "text", "\"" + elipticallyTruncate(h.Text, 20) + "\""
-	}
-	return "", ""
 }
 
 func elipticallyTruncate(s string, max int) string {

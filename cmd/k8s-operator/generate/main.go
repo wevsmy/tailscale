@@ -28,7 +28,6 @@ const (
 	proxyGroupCRDPath                   = operatorDeploymentFilesPath + "/crds/tailscale.com_proxygroups.yaml"
 	tailnetCRDPath                      = operatorDeploymentFilesPath + "/crds/tailscale.com_tailnets.yaml"
 	proxyGroupPolicyCRDPath             = operatorDeploymentFilesPath + "/crds/tailscale.com_proxygrouppolicies.yaml"
-	peerRelayCRDPath                    = operatorDeploymentFilesPath + "/crds/tailscale.com_peerrelays.yaml"
 	helmTemplatesPath                   = operatorDeploymentFilesPath + "/chart/templates"
 	connectorCRDHelmTemplatePath        = helmTemplatesPath + "/connector.yaml"
 	proxyClassCRDHelmTemplatePath       = helmTemplatesPath + "/proxyclass.yaml"
@@ -37,7 +36,6 @@ const (
 	proxyGroupCRDHelmTemplatePath       = helmTemplatesPath + "/proxygroup.yaml"
 	tailnetCRDHelmTemplatePath          = helmTemplatesPath + "/tailnet.yaml"
 	proxyGroupPolicyCRDHelmTemplatePath = helmTemplatesPath + "/proxygrouppolicy.yaml"
-	peerRelayCRDHelmTemplatePath        = helmTemplatesPath + "/peerrelay.yaml"
 
 	helmConditionalStart = "{{ if .Values.installCRDs -}}\n"
 	helmConditionalEnd   = "{{- end -}}"
@@ -162,7 +160,6 @@ func generate(baseDir string) error {
 		{proxyGroupCRDPath, proxyGroupCRDHelmTemplatePath},
 		{tailnetCRDPath, tailnetCRDHelmTemplatePath},
 		{proxyGroupPolicyCRDPath, proxyGroupPolicyCRDHelmTemplatePath},
-		{peerRelayCRDPath, peerRelayCRDHelmTemplatePath},
 	} {
 		if err := addCRDToHelm(crd.crdPath, crd.templatePath); err != nil {
 			return fmt.Errorf("error adding %s CRD to Helm templates: %w", crd.crdPath, err)
@@ -181,7 +178,6 @@ func cleanup(baseDir string) error {
 		proxyGroupCRDHelmTemplatePath,
 		tailnetCRDHelmTemplatePath,
 		proxyGroupPolicyCRDHelmTemplatePath,
-		peerRelayCRDHelmTemplatePath,
 	} {
 		if err := os.Remove(filepath.Join(baseDir, path)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("error cleaning up %s: %w", path, err)

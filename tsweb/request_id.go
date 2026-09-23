@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"tailscale.com/tstime"
 	"tailscale.com/util/ctxkey"
 	"tailscale.com/util/rands"
 )
@@ -48,7 +47,7 @@ func GenerateRequestID() RequestID {
 	// Now we return "REQ-2" version, where the "2" doubles as the year 2YYY
 	// in a leading date.
 	now := time.Now().UTC()
-	return RequestID("REQ-" + now.Format(tstime.NumericDateTime) + rands.HexString(16))
+	return RequestID("REQ-" + now.Format("20060102150405") + rands.HexString(16))
 }
 
 // SetRequestID is an HTTP middleware that injects a RequestID in the

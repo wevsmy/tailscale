@@ -167,7 +167,6 @@ var _HostinfoCloneNeedsRegeneration = Hostinfo(struct {
 	ShieldsUp       bool
 	ShareeNode      bool
 	NoLogsNoSupport bool
-	RemoteConfig    bool
 	WireIngress     bool
 	IngressEnabled  bool
 	AllowsUpdate    bool

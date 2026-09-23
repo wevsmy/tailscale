@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/netip"
 
-	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/opt"
 	"tailscale.com/types/preftype"
@@ -32,9 +31,8 @@ type ConfigVAlpha struct {
 	ExitNode                   *string  `json:"exitNode,omitempty"` // IP, StableID, or MagicDNS base name
 	AllowLANWhileUsingExitNode opt.Bool `json:"allowLANWhileUsingExitNode,omitempty"`
 
-	AdvertiseRoutes   []netip.Prefix `json:",omitempty"`
-	AdvertiseExitNode opt.Bool       `json:",omitzero"`
-	DisableSNAT       opt.Bool       `json:",omitzero"`
+	AdvertiseRoutes []netip.Prefix `json:",omitempty"`
+	DisableSNAT     opt.Bool       `json:",omitempty"`
 
 	AdvertiseServices []string `json:",omitempty"`
 
@@ -47,22 +45,12 @@ type ConfigVAlpha struct {
 	RunSSHServer    opt.Bool         `json:",omitempty"` // Tailscale SSH
 	RunWebClient    opt.Bool         `json:",omitempty"`
 	ShieldsUp       opt.Bool         `json:",omitempty"`
-	RemoteConfig    opt.Bool         `json:",omitzero"` // delegate full remote control to the tailnet admin; see Prefs.RemoteConfig
 	AutoUpdate      *AutoUpdatePrefs `json:",omitempty"`
 	ServeConfigTemp *ServeConfig     `json:",omitempty"` // TODO(bradfitz,maisem): make separate stable type for this
 
 	// StaticEndpoints are additional, user-defined endpoints that this node
 	// should advertise amongst its wireguard endpoints.
 	StaticEndpoints []netip.AddrPort `json:",omitempty"`
-
-	// RelayServerPort is the UDP port for the relay server to bind to.
-	// A value of 0 will pick a random unused port. Nil disables relay server.
-	RelayServerPort *uint16 `json:",omitzero"`
-
-	// RelayServerStaticEndpoints are static IP:port endpoints to advertise
-	// as candidates for relay connections. Only relevant when RelayServerPort
-	// is non-nil.
-	RelayServerStaticEndpoints []netip.AddrPort `json:",omitempty"`
 
 	// TODO(bradfitz,maisem): future something like:
 	// Profile map[string]*Config // keyed by alice@gmail.com, corp.com (TailnetSID)
@@ -127,14 +115,6 @@ func (c *ConfigVAlpha) ToPrefs() (MaskedPrefs, error) {
 		mp.AdvertiseRoutes = c.AdvertiseRoutes
 		mp.AdvertiseRoutesSet = true
 	}
-	if c.AdvertiseExitNode.EqualBool(true) {
-		if mp.AdvertiseRoutesSet {
-			mp.AdvertiseRoutes = append(mp.AdvertiseRoutes, tsaddr.AllIPv4(), tsaddr.AllIPv6())
-		} else {
-			mp.AdvertiseRoutes = tsaddr.ExitRoutes()
-			mp.AdvertiseRoutesSet = true
-		}
-	}
 	if c.DisableSNAT != "" {
 		mp.NoSNAT = c.DisableSNAT.EqualBool(true)
 		mp.NoSNATSet = true
@@ -168,10 +148,6 @@ func (c *ConfigVAlpha) ToPrefs() (MaskedPrefs, error) {
 		mp.ShieldsUp = c.ShieldsUp.EqualBool(true)
 		mp.ShieldsUpSet = true
 	}
-	if c.RemoteConfig != "" {
-		mp.RemoteConfig = c.RemoteConfig.EqualBool(true)
-		mp.RemoteConfigSet = true
-	}
 	if c.AutoUpdate != nil {
 		mp.AutoUpdate = *c.AutoUpdate
 		mp.AutoUpdateSet = AutoUpdatePrefsMask{ApplySet: true, CheckSet: true}
@@ -189,14 +165,6 @@ func (c *ConfigVAlpha) ToPrefs() (MaskedPrefs, error) {
 	mp.AdvertiseServicesSet = true
 	if c.AdvertiseServices != nil {
 		mp.AdvertiseServices = c.AdvertiseServices
-	}
-	mp.RelayServerPortSet = true
-	mp.RelayServerStaticEndpointsSet = true
-	if c.RelayServerPort != nil {
-		mp.RelayServerPort = c.RelayServerPort
-	}
-	if c.RelayServerStaticEndpoints != nil {
-		mp.RelayServerStaticEndpoints = c.RelayServerStaticEndpoints
 	}
 	return mp, nil
 }

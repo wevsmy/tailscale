@@ -146,10 +146,7 @@ func Subscribe[T any](c *Client) *Subscriber[T] {
 
 	r := c.subscribeStateLocked()
 	s := newSubscriber[T](r, logfForCaller(c.logger()))
-	// Register the non-generic core with the bus rather than the typed facade,
-	// mirroring SubscribeFunc and Publish: this keeps the bus's outputs map
-	// and subscriber-interface itab out of per-T cost.
-	r.addSubscriber(s.core)
+	r.addSubscriber(s)
 	return s
 }
 
@@ -172,11 +169,7 @@ func SubscribeFunc[T any](c *Client, f func(T)) *SubscriberFunc[T] {
 
 	r := c.subscribeStateLocked()
 	s := newSubscriberFunc[T](r, f, logfForCaller(c.logger()))
-	// Register the non-generic core, not the typed facade. Doing
-	// so means the bus's outputs map and the subscriber interface
-	// itab are not parameterized by T, eliminating per-T itab and
-	// dictionary cost.
-	r.addSubscriber(s.core)
+	r.addSubscriber(s)
 	return s
 }
 
@@ -184,11 +177,6 @@ func SubscribeFunc[T any](c *Client, f func(T)) *SubscriberFunc[T] {
 // It panics if c is closed.
 func Publish[T any](c *Client) *Publisher[T] {
 	p := newPublisher[T](c)
-	// Register the non-generic core with the client so the
-	// per-Client publisher set, the publisher interface itab, and
-	// the publisher equality function are not parameterized by T.
-	// This eliminates per-T itab/dictionary/eq cost for every new
-	// event type passed through Publish[T].
-	c.addPublisher(p.core)
+	c.addPublisher(p)
 	return p
 }

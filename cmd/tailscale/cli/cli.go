@@ -93,8 +93,8 @@ var localClient = local.Client{
 	Socket: paths.DefaultTailscaledSocket(),
 }
 
-// RunWithContext runs the CLI. The args do not include the binary name.
-func RunWithContext(ctx context.Context, args []string) (err error) {
+// Run runs the CLI. The args do not include the binary name.
+func Run(args []string) (err error) {
 	if runtime.GOOS == "linux" && os.Getenv("GOKRAZY_FIRST_START") == "1" && distro.Get() == distro.Gokrazy && os.Getppid() == 1 && len(args) == 0 {
 		// We're running on gokrazy and the user did not specify 'up'.
 		// Don't run the tailscale CLI and spam logs with usage; just exit.
@@ -164,7 +164,7 @@ func RunWithContext(ctx context.Context, args []string) (err error) {
 		return
 	}
 
-	err = rootCmd.Run(ctx)
+	err = rootCmd.Run(context.Background())
 	if local.IsAccessDeniedError(err) && os.Getuid() != 0 && runtime.GOOS != "windows" {
 		return fmt.Errorf("%v\n\nUse 'sudo tailscale %s'.\nTo not require root, use 'sudo tailscale set --operator=$USER' once.", err, strings.Join(args, " "))
 	}
@@ -172,11 +172,6 @@ func RunWithContext(ctx context.Context, args []string) (err error) {
 		return nil
 	}
 	return err
-}
-
-// Run is equivalent to calling [RunWithContext] with the background context.
-func Run(args []string) (err error) {
-	return RunWithContext(context.Background(), args)
 }
 
 type onceFlagValue struct {
@@ -239,10 +234,9 @@ func noDupFlagify(c *ffcli.Command, tb testenv.TB) {
 var (
 	fileCmd,
 	sysPolicyCmd,
-	maybeRoutecheckCmd,
 	maybeWebCmd,
 	maybeDriveCmd,
-	maybeTailnetLockCmd,
+	maybeNetlockCmd,
 	maybeFunnelCmd,
 	maybeServeCmd,
 	maybeCertCmd,
@@ -275,14 +269,12 @@ change in the future.
 			upCmd,
 			downCmd,
 			setCmd,
-			getCmd,
 			loginCmd,
 			logoutCmd,
 			switchCmd,
 			configureCmd(),
 			nilOrCall(sysPolicyCmd),
 			netcheckCmd,
-			nilOrCall(maybeRoutecheckCmd),
 			ipCmd,
 			dnsCmd,
 			statusCmd,
@@ -292,18 +284,16 @@ change in the future.
 			sshCmd,
 			nilOrCall(maybeFunnelCmd),
 			nilOrCall(maybeServeCmd),
-			serviceCmd,
 			versionCmd,
 			nilOrCall(maybeWebCmd),
 			nilOrCall(fileCmd),
 			bugReportCmd,
 			nilOrCall(maybeCertCmd),
-			nilOrCall(maybeTailnetLockCmd),
+			nilOrCall(maybeNetlockCmd),
 			licensesCmd,
 			exitNodeCmd(),
 			nilOrCall(maybeUpdateCmd),
 			whoisCmd,
-			whoamiCmd,
 			debugCmd(),
 			nilOrCall(maybeDriveCmd),
 			idTokenCmd,
@@ -489,7 +479,7 @@ func usageFuncOpt(c *ffcli.Command, withDefaults bool) string {
 
 			showDefault := f.DefValue != "" && withDefaults
 			// Issue 6766: don't show the default Windows socket path. It's long
-			// and distracting. And people on Windows aren't likely to ever
+			// and distracting. And people on on Windows aren't likely to ever
 			// change it anyway.
 			if runtime.GOOS == "windows" && f.Name == "socket" && strings.HasPrefix(f.DefValue, `\\.\pipe\ProtectedPrefix\`) {
 				showDefault = false

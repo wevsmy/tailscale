@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -18,6 +19,7 @@ import (
 )
 
 const (
+	dnsBaseGP     = `SOFTWARE\Policies\Microsoft\Windows NT\DNSClient`
 	nrptBaseLocal = `SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig`
 	nrptBaseGP    = `SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig`
 
@@ -51,12 +53,13 @@ const (
 // nrptRuleDatabase encapsulates access to the Windows Name Resolution Policy
 // Table (NRPT).
 type nrptRuleDatabase struct {
-	logf      logger.Logf
-	watcher   *gp.ChangeWatcher
-	mu        sync.Mutex // protects the fields below
-	ruleIDs   []string
-	isGPDirty bool
-	writeAsGP bool
+	logf               logger.Logf
+	watcher            *gp.ChangeWatcher
+	isGPRefreshPending atomic.Bool
+	mu                 sync.Mutex // protects the fields below
+	ruleIDs            []string
+	isGPDirty          bool
+	writeAsGP          bool
 }
 
 func newNRPTRuleDatabase(logf logger.Logf) *nrptRuleDatabase {
@@ -138,12 +141,6 @@ func (db *nrptRuleDatabase) detectWriteAsGP() {
 	writeAsGP = len(gpSubkeyMap) > 0
 }
 
-func regKeyHasNoValues(ki *registry.KeyInfo) bool {
-	// Either the key has no values, or there is one value: an empty default value.
-	return ki.ValueCount == 0 ||
-		ki.ValueCount == 1 && ki.MaxValueNameLen == 0 && ki.MaxValueLen == 0
-}
-
 // DelAllRuleKeys removes any and all NRPT rules that are owned by Tailscale.
 func (db *nrptRuleDatabase) DelAllRuleKeys() error {
 	db.mu.Lock()
@@ -174,7 +171,7 @@ func (db *nrptRuleDatabase) delRuleKeys(nrptRuleIDs []string) error {
 		keyNameGP := nrptBaseGP + `\` + rid
 		err := registry.DeleteKey(registry.LOCAL_MACHINE, keyNameGP)
 		if err == nil {
-			// If this deleted subkey existed under the GP key, we will need to notify.
+			// If this deleted subkey existed under the GP key, we will need to refresh.
 			db.isGPDirty = true
 		} else if err != registry.ErrNotExist {
 			db.logf("Error deleting NRPT rule key %q: %v", keyNameGP, err)
@@ -196,8 +193,8 @@ func (db *nrptRuleDatabase) delRuleKeys(nrptRuleIDs []string) error {
 	return registry.DeleteKey(registry.LOCAL_MACHINE, nrptBaseGP)
 }
 
-// isPolicyConfigSubkeyEmpty returns whether the nrptBaseGP exists and does not
-// contain any values or subkeys.
+// isPolicyConfigSubkeyEmpty returns true if and only if the nrptBaseGP exists
+// and does not contain any values or subkeys.
 func isPolicyConfigSubkeyEmpty() (bool, error) {
 	subKey, err := registry.OpenKey(registry.LOCAL_MACHINE, nrptBaseGP, registry.READ)
 	if err != nil {
@@ -213,7 +210,7 @@ func isPolicyConfigSubkeyEmpty() (bool, error) {
 		return false, err
 	}
 
-	return regKeyHasNoValues(ki) && ki.SubKeyCount == 0, nil
+	return (ki.ValueCount == 0 && ki.SubKeyCount == 0), nil
 }
 
 func (db *nrptRuleDatabase) WriteSplitDNSConfig(servers []string, domains []dnsname.FQDN) error {
@@ -280,22 +277,26 @@ func (db *nrptRuleDatabase) WriteSplitDNSConfig(servers []string, domains []dnsn
 	return nil
 }
 
-// NotifyPolicyChanged notifies the Windows group policy engine when policies have changed.
-func (db *nrptRuleDatabase) NotifyPolicyChanged() {
+// Refresh notifies the Windows group policy engine when policies have changed.
+func (db *nrptRuleDatabase) Refresh() {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	db.notifyPolicyChangedLocked()
+	db.refreshLocked()
 }
 
-func (db *nrptRuleDatabase) notifyPolicyChangedLocked() {
+func (db *nrptRuleDatabase) refreshLocked() {
 	if !db.isGPDirty {
 		return
 	}
 
-	db.logf("Calling NotifyMachinePolicyChange")
-	if err := gp.NotifyMachinePolicyChange(); err != nil {
-		db.logf("NotifyMachinePolicyChange failed: %v", err)
+	// Record that we are about to initiate a refresh.
+	// (*nrptRuleDatabase).watchForGPChanges() checks this value to avoid false
+	// positives.
+	db.isGPRefreshPending.Store(true)
+
+	if err := gp.RefreshMachinePolicy(true); err != nil {
+		db.logf("RefreshMachinePolicy failed: %v", err)
 		return
 	}
 
@@ -354,7 +355,12 @@ func writeNRPTValues(key registry.Key, servers string, doms []string) error {
 
 func (db *nrptRuleDatabase) watchForGPChanges() {
 	watchHandler := func() {
-		db.logf("Received machine group policy change notification. Reconfiguring NRPT rule database.")
+		// Do not invoke detectWriteAsGP when we ourselves were responsible for
+		// initiating the group policy refresh.
+		if db.isGPRefreshPending.CompareAndSwap(true, false) {
+			return
+		}
+		db.logf("Computer group policies refreshed, reconfiguring NRPT rule database.")
 		db.detectWriteAsGP()
 	}
 
@@ -374,8 +380,8 @@ func (db *nrptRuleDatabase) watchForGPChanges() {
 // db.mu must already be locked.
 func (db *nrptRuleDatabase) updateGroupPoliciesLocked(writeAsGP bool) {
 	// Since we're updating the group policy NRPT table, we need
-	// to notify once this updateGroupPoliciesLocked is done.
-	defer db.notifyPolicyChangedLocked()
+	// to refresh once this updateGroupPoliciesLocked is done.
+	defer db.refreshLocked()
 
 	for _, id := range db.ruleIDs {
 		if writeAsGP {

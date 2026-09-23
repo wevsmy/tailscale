@@ -43,7 +43,6 @@ import (
 	"tailscale.com/net/netknob"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/netns"
-	"tailscale.com/net/netutil"
 	"tailscale.com/net/netx"
 	"tailscale.com/net/tlsdial"
 	"tailscale.com/paths"
@@ -54,14 +53,12 @@ import (
 	"tailscale.com/util/eventbus"
 	"tailscale.com/util/must"
 	"tailscale.com/util/racebuild"
+	"tailscale.com/util/syspolicy/pkey"
+	"tailscale.com/util/syspolicy/policyclient"
 	"tailscale.com/util/testenv"
 	"tailscale.com/version"
 	"tailscale.com/version/distro"
 )
-
-// GetLogTarget is an optional hook to register a function
-// that returns the log target URL to be used by logpolicy.
-var GetLogTarget feature.Hook[func() string]
 
 var getLogTargetOnce struct {
 	sync.Once
@@ -70,12 +67,8 @@ var getLogTargetOnce struct {
 
 func getLogTarget() string {
 	getLogTargetOnce.Do(func() {
-		if f, ok := GetLogTarget.GetOk(); ok {
-			getLogTargetOnce.v = f()
-		}
-		if getLogTargetOnce.v == "" {
-			getLogTargetOnce.v, _ = os.LookupEnv("TS_LOG_TARGET")
-		}
+		envTarget, _ := os.LookupEnv("TS_LOG_TARGET")
+		getLogTargetOnce.v, _ = policyclient.Get().GetString(pkey.LogTarget, envTarget)
 	})
 
 	return getLogTargetOnce.v
@@ -257,6 +250,17 @@ func LogsDir(logf logger.Logf) string {
 			logf("logpolicy: using system state directory %q", d)
 			return d
 		}
+	}
+
+	if runtime.GOOS == "android" {
+		if fi, err := os.Stat("/data/adb/tailscale"); err == nil && fi.IsDir() {
+			return "/data/adb/tailscale/log"
+		}
+		prefix := os.Getenv("PREFIX")
+		if prefix == "" {
+			return filepath.Join(os.TempDir(), "tailscale", "log")
+		}
+		return filepath.Join(prefix, "var", "log", "tailscale")
 	}
 
 	cacheDir, err := os.UserCacheDir()
@@ -546,18 +550,7 @@ func (opts Options) init(disableLogging bool) (*logtail.Config, *Policy) {
 		// anyway, no need to add one.
 		lflags = 0
 	}
-	var conWriter io.Writer = stderrWriter{}
-	if buildfeatures.HasSyslog {
-		if f, ok := feature.HookLogSink.GetOk(); ok {
-			if w := f(); w != nil {
-				// Logs are being redirected elsewhere (e.g. to syslog,
-				// which records its own timestamps).
-				conWriter = w
-				lflags = 0
-			}
-		}
-	}
-	console := log.New(conWriter, "", lflags)
+	console := log.New(stderrWriter{}, "", lflags)
 
 	var earlyErrBuf bytes.Buffer
 	earlyLogf := func(format string, a ...any) {
@@ -896,7 +889,7 @@ func (opts TransportOptions) New() http.RoundTripper {
 		opts.NetMon = netmon.NewStatic()
 	}
 	// Start with a copy of http.DefaultTransport and tweak it a bit.
-	tr := netutil.NewDefaultTransport()
+	tr := http.DefaultTransport.(*http.Transport).Clone()
 	if opts.TLSClientConfig != nil {
 		tr.TLSClientConfig = opts.TLSClientConfig.Clone()
 	}

@@ -26,7 +26,10 @@ func parsePort(s mem.RO) int {
 	// a.b.c.d.1234 or [a:b:c:d].1234
 	i2 := mem.LastIndexByte(s, '.')
 
-	i := max(i2, i1)
+	i := i1
+	if i2 > i {
+		i = i2
+	}
 	if i < 0 {
 		// no match; weird
 		return -1

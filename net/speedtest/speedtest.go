@@ -24,7 +24,7 @@ const (
 // conduct the test.
 type config struct {
 	Version      int           `json:"version"`
-	TestDuration time.Duration `json:"time"` // int64 nanoseconds; no jsonv2 format tag (tailscale/tailscale#20528)
+	TestDuration time.Duration `json:"time,format:nano"`
 	Direction    Direction     `json:"direction"`
 }
 

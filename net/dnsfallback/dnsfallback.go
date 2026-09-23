@@ -30,7 +30,6 @@ import (
 	"tailscale.com/health"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/netns"
-	"tailscale.com/net/netutil"
 	"tailscale.com/net/tlsdial"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/logger"
@@ -134,7 +133,7 @@ func lookup(ctx context.Context, host string, logf logger.Logf, ht *health.Track
 // ht may be nil.
 func bootstrapDNSMap(ctx context.Context, serverName string, serverIP netip.Addr, queryName string, logf logger.Logf, ht *health.Tracker, netMon *netmon.Monitor) (dnsMap, error) {
 	dialer := netns.NewDialer(logf, netMon)
-	tr := netutil.NewDefaultTransport()
+	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DisableKeepAlives = true // This transport is meant to be used once.
 	tr.Proxy = feature.HookProxyFromEnvironment.GetOrNil()
 	tr.DialContext = func(ctx context.Context, netw, addr string) (net.Conn, error) {

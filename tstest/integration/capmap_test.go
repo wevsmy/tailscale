@@ -14,6 +14,7 @@ import (
 
 // TestPeerCapMap tests that the node capability map (CapMap) is included in peer information.
 func TestPeerCapMap(t *testing.T) {
+	tstest.Shard(t)
 	tstest.Parallel(t)
 	env := NewTestEnv(t)
 
@@ -96,6 +97,7 @@ func TestPeerCapMap(t *testing.T) {
 
 // TestSetNodeCapMap tests that SetNodeCapMap updates are propagated to peers.
 func TestSetNodeCapMap(t *testing.T) {
+	tstest.Shard(t)
 	tstest.Parallel(t)
 	env := NewTestEnv(t)
 

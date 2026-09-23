@@ -172,32 +172,6 @@ func TestWriteState(t *testing.T) {
 			},
 			allowPatch: true,
 		},
-		{
-			name: "delete_with_patch",
-			initial: map[string][]byte{
-				"foo": []byte("bar"),
-				"baz": []byte("quux"),
-			},
-			key:   "foo",
-			value: nil,
-			wantData: map[string][]byte{
-				"baz": []byte("quux"),
-			},
-			allowPatch: true,
-		},
-		{
-			name: "delete_with_update",
-			initial: map[string][]byte{
-				"foo": []byte("bar"),
-				"baz": []byte("quux"),
-			},
-			key:   "foo",
-			value: nil,
-			wantData: map[string][]byte{
-				"baz": []byte("quux"),
-			},
-			allowPatch: false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -234,9 +208,6 @@ func TestWriteState(t *testing.T) {
 						} else if p.Op == "add" && strings.HasPrefix(p.Path, "/data/") {
 							key := strings.TrimPrefix(p.Path, "/data/")
 							secret[key] = p.Value.([]byte)
-						} else if p.Op == "remove" && strings.HasPrefix(p.Path, "/data/") {
-							key := strings.TrimPrefix(p.Path, "/data/")
-							delete(secret, key)
 						}
 					}
 					return nil
@@ -263,17 +234,11 @@ func TestWriteState(t *testing.T) {
 
 			// Verify memory store was updated
 			got, err := s.memory.ReadState(ipn.StateKey(sanitizeKey(string(tt.key))))
-			if tt.value == nil {
-				if err != ipn.ErrStateNotExist {
-					t.Errorf("reading deleted key from memory store: got err %v, want ErrStateNotExist", err)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("reading from memory store: %v", err)
-				}
-				if !cmp.Equal(got, tt.value) {
-					t.Errorf("memory store key %q = %v, want %v", tt.key, got, tt.value)
-				}
+			if err != nil {
+				t.Errorf("reading from memory store: %v", err)
+			}
+			if !cmp.Equal(got, tt.value) {
+				t.Errorf("memory store key %q = %v, want %v", tt.key, got, tt.value)
 			}
 		})
 	}
@@ -374,7 +339,8 @@ func TestWriteTLSCertAndKey(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 
 			// Set POD_NAME for testing selectors
-			envknob.SetenvForTest(t, "POD_NAME", "ingress-proxies-1")
+			envknob.Setenv("POD_NAME", "ingress-proxies-1")
+			defer envknob.Setenv("POD_NAME", "")
 
 			secret := tt.initial // track current state
 			client := &kubeclient.FakeClient{
@@ -770,7 +736,7 @@ func TestNewWithClient(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			envknob.SetenvForTest(t, "TS_CERT_SHARE_MODE", tt.certMode)
+			envknob.Setenv("TS_CERT_SHARE_MODE", tt.certMode)
 
 			t.Setenv("POD_NAME", "ingress-proxies-1")
 

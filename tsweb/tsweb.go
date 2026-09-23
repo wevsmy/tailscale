@@ -42,6 +42,16 @@ import (
 var DevMode bool
 
 func DefaultCertDir(leafDir string) string {
+	if runtime.GOOS == "android" {
+		if fi, err := os.Stat("/data/adb/tailscale"); err == nil && fi.IsDir() {
+			return "/data/adb/tailscale/certs"
+		}
+		prefix := os.Getenv("PREFIX")
+		if prefix == "" {
+			return filepath.Join(os.TempDir(), "tailscale", "certs")
+		}
+		return filepath.Join(prefix, "var", "lib", "tailscale", "certs")
+	}
 	cacheDir, err := os.UserCacheDir()
 	if err == nil {
 		return filepath.Join(cacheDir, "tailscale", leafDir)
@@ -74,7 +84,7 @@ func parseTrustedCIDRs(raw string) []netip.Prefix {
 		return nil
 	}
 	var prefixes []netip.Prefix
-	for s := range strings.SplitSeq(raw, ",") {
+	for _, s := range strings.Split(raw, ",") {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
@@ -784,12 +794,6 @@ func (h errorHandler) handleError(w http.ResponseWriter, r *http.Request, lw *lo
 	// Extract a presentable, loggable error.
 	var hOK bool
 	hErr, hAsOK := errors.AsType[HTTPError](err)
-	if !hAsOK {
-		if hs, ok := errors.AsType[HTTPStatuser](err); ok {
-			hErr = hs.HTTPStatus()
-			hAsOK = true
-		}
-	}
 	if hAsOK {
 		hOK = true
 		if hErr.Code == 0 {
@@ -923,15 +927,6 @@ func WriteHTTPError(w http.ResponseWriter, r *http.Request, e HTTPError) {
 			io.WriteString(w, "\n")
 		}
 	}
-}
-
-// HTTPStatuser is an optional interface implemented by errors that
-// carry an intended HTTP response. Handlers translating errors to
-// HTTP should honour the returned HTTPError rather than defaulting to
-// 500.
-type HTTPStatuser interface {
-	error
-	HTTPStatus() HTTPError
 }
 
 // HTTPError is an error with embedded HTTP response information.

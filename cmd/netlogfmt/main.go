@@ -45,7 +45,6 @@ import (
 	jsonv2 "github.com/go-json-experiment/json"
 	"github.com/go-json-experiment/json/jsontext"
 	"tailscale.com/tailcfg"
-	"tailscale.com/tstime"
 	"tailscale.com/types/bools"
 	"tailscale.com/types/logid"
 	"tailscale.com/types/netlogtype"
@@ -295,7 +294,7 @@ func printMessage(msg message) {
 		fmt.Printf("NodeID: %s\n", msg.NodeID)
 	}
 	formatTime := func(t time.Time) string {
-		return t.Local().Format(tstime.DateSpTimeMilliZ)
+		return t.In(time.Local).Format("2006-01-02 15:04:05.000")
 	}
 	switch {
 	case !msg.Logged.IsZero():

@@ -273,12 +273,9 @@ func (c *conn) processFrames(
 		// Control frames: pass through without inspection.
 		if isControlMessage(typ) {
 			maskSet := isMasked(b)
-			payloadLen, payloadOffset, _, ok, err := fragmentDimensions(b, maskSet)
+			payloadLen, payloadOffset, _, err := fragmentDimensions(b, maskSet)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing control frame: %w", err)
-			}
-			if !ok {
-				return raw, nil // incomplete control frame header
 			}
 			frameLen := int(payloadOffset + payloadLen)
 			if len(b) < frameLen {

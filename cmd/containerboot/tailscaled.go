@@ -150,15 +150,7 @@ func tailscaleUp(ctx context.Context, cfg *settings) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			// A canceled context kills the command, and cmd.Run can
-			// report the subprocess's death ("signal: killed") rather
-			// than the context error that caused it. Return the
-			// context error so that callers (and ultimately main) can
-			// recognize a graceful shutdown with errors.Is.
-			return fmt.Errorf("tailscale up failed: %w", ctxErr)
-		}
-		return fmt.Errorf("tailscale up failed: %w", err)
+		return fmt.Errorf("tailscale up failed: %v", err)
 	}
 	return nil
 }
@@ -188,11 +180,7 @@ func tailscaleSet(ctx context.Context, cfg *settings) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			// See the equivalent check in tailscaleUp.
-			return fmt.Errorf("tailscale set failed: %w", ctxErr)
-		}
-		return fmt.Errorf("tailscale set failed: %w", err)
+		return fmt.Errorf("tailscale set failed: %v", err)
 	}
 	return nil
 }

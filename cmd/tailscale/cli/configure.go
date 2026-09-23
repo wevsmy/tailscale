@@ -32,8 +32,6 @@ services on the host to use Tailscale in more ways.
 		Subcommands: nonNilCmds(
 			configureKubeconfigCmd(),
 			synologyConfigureCmd(),
-			flashApplianceCmd(),
-			pveApplianceCmd(),
 			ccall(maybeConfigSynologyCertCmd),
 			ccall(maybeSysExtCmd),
 			ccall(maybeVPNConfigCmd),

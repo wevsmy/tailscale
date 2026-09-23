@@ -29,38 +29,34 @@ func init() {
 }
 
 // resolveAuthKey uses OIDC identity federation to exchange the provided ID token and client ID for an authkey.
-func resolveAuthKey(ctx context.Context, args tailscale.ResolveAuthKeyWIFArgs) (string, error) {
-	if args.ClientID == "" {
+func resolveAuthKey(ctx context.Context, baseURL, clientID, idToken, audience string, tags []string) (string, error) {
+	if clientID == "" {
 		return "", nil // Short-circuit, no client ID means not using identity federation
 	}
 
-	if args.IDToken == "" {
-		if args.Audience == "" {
+	if idToken == "" {
+		if audience == "" {
 			return "", errors.New("federated identity requires either an ID token or an audience")
 		}
-		providerIdToken, err := wif.ObtainProviderToken(ctx, args.Audience)
+		providerIdToken, err := wif.ObtainProviderToken(ctx, audience)
 		if err != nil {
 			return "", errors.New("federated identity authkeys require --id-token")
 		}
-		args.IDToken = providerIdToken
+		idToken = providerIdToken
 	}
-	if len(args.Tags) == 0 {
+	if len(tags) == 0 {
 		return "", errors.New("federated identity authkeys require --advertise-tags")
 	}
-	if args.BaseURL == "" {
-		args.BaseURL = ipn.DefaultControlURL
+	if baseURL == "" {
+		baseURL = ipn.DefaultControlURL
 	}
 
-	strippedID, ephemeral, preauth, err := parseOptionalAttributes(args.ClientID)
+	strippedID, ephemeral, preauth, err := parseOptionalAttributes(clientID)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse optional config attributes: %w", err)
 	}
 
-	accessToken, err := exchangeJWTForToken(ctx, tailscale.ExchangeJWTForTokenWIFArgs{
-		BaseURL:  args.BaseURL,
-		ClientID: strippedID,
-		IDToken:  args.IDToken,
-	})
+	accessToken, err := exchangeJWTForToken(ctx, baseURL, strippedID, idToken)
 	if err != nil {
 		return "", fmt.Errorf("failed to exchange JWT for access token: %w", err)
 	}
@@ -70,7 +66,7 @@ func resolveAuthKey(ctx context.Context, args tailscale.ResolveAuthKeyWIFArgs) (
 
 	tsClient := tailscale.NewClient("-", tailscale.APIKey(accessToken))
 	tsClient.UserAgent = "tailscale-cli-identity-federation"
-	tsClient.BaseURL = args.BaseURL
+	tsClient.BaseURL = baseURL
 
 	authkey, _, err := tsClient.CreateKey(ctx, tailscale.KeyCapabilities{
 		Devices: tailscale.KeyDeviceCapabilities{
@@ -78,7 +74,7 @@ func resolveAuthKey(ctx context.Context, args tailscale.ResolveAuthKeyWIFArgs) (
 				Reusable:      false,
 				Ephemeral:     ephemeral,
 				Preauthorized: preauth,
-				Tags:          args.Tags,
+				Tags:          tags,
 			},
 		},
 	})
@@ -121,15 +117,15 @@ func parseOptionalAttributes(clientID string) (strippedID string, ephemeral bool
 }
 
 // exchangeJWTForToken exchanges a JWT for a Tailscale access token.
-func exchangeJWTForToken(ctx context.Context, args tailscale.ExchangeJWTForTokenWIFArgs) (string, error) {
+func exchangeJWTForToken(ctx context.Context, baseURL, clientID, idToken string) (string, error) {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
 	token, err := (&oauth2.Config{
 		Endpoint: oauth2.Endpoint{
-			TokenURL: fmt.Sprintf("%s/api/v2/oauth/token-exchange", args.BaseURL),
+			TokenURL: fmt.Sprintf("%s/api/v2/oauth/token-exchange", baseURL),
 		},
-	}).Exchange(ctx, "", oauth2.SetAuthURLParam("client_id", args.ClientID), oauth2.SetAuthURLParam("jwt", args.IDToken))
+	}).Exchange(ctx, "", oauth2.SetAuthURLParam("client_id", clientID), oauth2.SetAuthURLParam("jwt", idToken))
 	if err != nil {
 		// Try to extract more detailed error message
 		if retrieveErr, ok := errors.AsType[*oauth2.RetrieveError](err); ok {

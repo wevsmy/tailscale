@@ -29,7 +29,7 @@ const minTSMPSize = 7 // the rejected body is 7 bytes
 // On the wire, after the IP header, it's currently 7 or 8 bytes:
 //   - '!'
 //   - IPProto byte (IANA protocol number: TCP or UDP)
-//   - byte stating rejection reason (see [TailscaleRejectReason] for valid values)
+//   - 'A' or 'S' (RejectedDueToACLs, RejectedDueToShieldsUp)
 //   - srcPort big endian uint16
 //   - dstPort big endian uint16
 //   - [optional] byte of flag bits:
@@ -63,20 +63,19 @@ func (rh TailscaleRejectedHeader) String() string {
 	return fmt.Sprintf("TSMP-reject-flow{%s %s > %s}: %s", rh.Proto, rh.Src, rh.Dst, rh.Reason)
 }
 
-// TSMPType is the type byte of a TSMP message. It follows the IPv4 or IPv6 header.
 type TSMPType uint8
 
 const (
-	// TSMPTypeRejectedConn is the type byte for a [TailscaleRejectedHeader].
+	// TSMPTypeRejectedConn is the type byte for a TailscaleRejectedHeader.
 	TSMPTypeRejectedConn TSMPType = '!'
 
-	// TSMPTypePing is the type byte for a [TSMPPingRequest].
+	// TSMPTypePing is the type byte for a TailscalePingRequest.
 	TSMPTypePing TSMPType = 'p'
 
-	// TSMPTypePong is the type byte for a [TSMPPongReply].
+	// TSMPTypePong is the type byte for a TailscalePongResponse.
 	TSMPTypePong TSMPType = 'o'
 
-	// TSMPTypeDiscoAdvertisement is the type byte for a [TSMPDiscoKeyAdvertisement].
+	// TSPMTypeDiscoAdvertisement is the type byte for sending disco keys
 	TSMPTypeDiscoAdvertisement TSMPType = 'a'
 )
 
@@ -102,11 +101,6 @@ const (
 	// RejectedDueToHostFirewall means that the target host's
 	// firewall is blocking the traffic.
 	RejectedDueToHostFirewall TailscaleRejectReason = 'W'
-
-	// RejectedDueToUnknownAppConnectorTransitIP means that the connector host has no real IP
-	// mapping that matches the provided transit IP for this client, so the
-	// connector has no destination to forward the connection to.
-	RejectedDueToUnknownAppConnectorTransitIP TailscaleRejectReason = 'T'
 )
 
 func (r TailscaleRejectReason) String() string {
@@ -119,8 +113,6 @@ func (r TailscaleRejectReason) String() string {
 		return "host-ip-forwarding-unavailable"
 	case RejectedDueToHostFirewall:
 		return "host-firewall"
-	case RejectedDueToUnknownAppConnectorTransitIP:
-		return "app-connector-transit-ip-unknown"
 	}
 	return fmt.Sprintf("0x%02x", byte(r))
 }

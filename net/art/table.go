@@ -553,7 +553,10 @@ func computePrefixSplit(a, b netip.Prefix) (lastCommon netip.Prefix, aStride, bS
 		panic("computePrefixSplit called with mismatched address families")
 	}
 
-	minPrefixLen := min(b.Bits(), a.Bits())
+	minPrefixLen := a.Bits()
+	if b.Bits() < minPrefixLen {
+		minPrefixLen = b.Bits()
+	}
 
 	commonBits := commonBits(a.Addr(), b.Addr(), minPrefixLen)
 	// We want to know how many 8-bit strides are shared between a and

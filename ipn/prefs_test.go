@@ -67,10 +67,10 @@ func TestPrefsEqual(t *testing.T) {
 		"AppConnector",
 		"PostureChecking",
 		"NetfilterKind",
-		"RemoteConfig",
 		"DriveShares",
 		"RelayServerPort",
 		"RelayServerStaticEndpoints",
+		"AllowSingleHosts",
 		"Persist",
 	}
 	if have := fieldsOf(reflect.TypeFor[Prefs]()); !reflect.DeepEqual(have, prefsHandles) {
@@ -525,11 +525,6 @@ func TestPrefsPretty(t *testing.T) {
 			"Prefs{ra=false dns=false want=false shields=true update=off Persist=nil}",
 		},
 		{
-			Prefs{RemoteConfig: true},
-			"windows",
-			"Prefs{ra=false dns=false want=false remoteconfig=true update=off Persist=nil}",
-		},
-		{
 			Prefs{},
 			"windows",
 			"Prefs{ra=false dns=false want=false update=off Persist=nil}",
@@ -719,7 +714,7 @@ func TestMaskedPrefsFields(t *testing.T) {
 	have := map[string]bool{}
 	for _, f := range fieldsOf(reflect.TypeFor[Prefs]()) {
 		switch f {
-		case "Persist":
+		case "Persist", "AllowSingleHosts":
 			// These can't be edited.
 			continue
 		}
@@ -1011,19 +1006,10 @@ func TestExitNodeIPOfArg(t *testing.T) {
 			want: mustIP("1.2.3.4"),
 		},
 		{
-			name: "no_match",
-			arg:  "unknown",
-			st: &ipnstate.Status{
-				MagicDNSSuffix: ".foo",
-				Peer: map[key.NodePublic]*ipnstate.PeerStatus{
-					key.NewNode().Public(): {
-						DNSName:        "skippy.foo.",
-						TailscaleIPs:   []netip.Addr{mustIP("1.0.0.2")},
-						ExitNodeOption: true,
-					},
-				},
-			},
-			wantErr: `invalid value "unknown" for --exit-node; must be IP or peer hostname`,
+			name:    "no_match",
+			arg:     "unknown",
+			st:      &ipnstate.Status{MagicDNSSuffix: ".foo"},
+			wantErr: `invalid value "unknown" for --exit-node; must be IP or hostname`,
 		},
 		{
 			name: "name",
@@ -1071,12 +1057,6 @@ func TestExitNodeIPOfArg(t *testing.T) {
 			want: mustIP("1.0.0.2"),
 		},
 		{
-			name:    "hostname_no_peer",
-			arg:     "skippy.foo",
-			st:      &ipnstate.Status{},
-			wantErr: `cannot resolve exit node by hostname while Tailscale is starting up; please use its Tailscale IP address instead`,
-		},
-		{
 			name: "name_not_exit",
 			arg:  "skippy",
 			st: &ipnstate.Status{
@@ -1102,7 +1082,7 @@ func TestExitNodeIPOfArg(t *testing.T) {
 					},
 				},
 			},
-			wantErr: `invalid value "skippy.bar." for --exit-node; must be IP or peer hostname`,
+			wantErr: `invalid value "skippy.bar." for --exit-node; must be IP or hostname`,
 		},
 		{
 			name: "ambiguous",
@@ -1224,6 +1204,27 @@ func TestNotifyPrefsJSONRoundtrip(t *testing.T) {
 	}
 	if n2.Prefs != nil && n2.Prefs.Valid() {
 		t.Fatal("Prefs should not be valid after deserialization")
+	}
+}
+
+// Verify that our Prefs type writes out an AllowSingleHosts field so we can
+// downgrade to older versions that require it.
+func TestPrefsDowngrade(t *testing.T) {
+	var p Prefs
+	j, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type oldPrefs struct {
+		AllowSingleHosts bool
+	}
+	var op oldPrefs
+	if err := json.Unmarshal(j, &op); err != nil {
+		t.Fatal(err)
+	}
+	if !op.AllowSingleHosts {
+		t.Fatal("AllowSingleHosts should be true")
 	}
 }
 

@@ -37,6 +37,8 @@ jobs:
           - "elementary/docker:stable"
           - "elementary/docker:unstable"
           - "parrotsec/core:latest"
+          - "kalilinux/kali-rolling"
+          - "kalilinux/kali-dev"
           - "oraclelinux:9"
           - "oraclelinux:8"
           - "fedora:latest"
@@ -59,9 +61,6 @@ jobs:
           - { image: "debian:stable-slim", deps: "curl" }
           - { image: "ubuntu:24.04", deps: "curl" }
           - { image: "fedora:latest", deps: "curl" }
-          # Kali doesn't have ca-certificates installed by default anymore
-          - { image: "kalilinux/kali-dev", "deps": "curl ca-certificates"}
-          - { image: "kalilinux/kali-rolling", "deps": "curl ca-certificates"}
           # Test TAILSCALE_VERSION pinning on a subset of distros.
           # Skip Alpine as community repos don't reliably keep old versions.
           - { image: "debian:stable-slim", deps: "curl", version: "1.80.0" }
@@ -69,7 +68,7 @@ jobs:
           - { image: "fedora:latest", deps: "curl", version: "1.80.0" }
     runs-on: ubuntu-latest
     container:
-      image: ${{ matrix.image }} # zizmor: ignore[unpinned-images]
+      image: ${{ matrix.image }}
       options: --user root
     steps:
     - name: install dependencies (pacman)

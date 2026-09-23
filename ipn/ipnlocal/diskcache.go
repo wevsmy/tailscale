@@ -10,7 +10,6 @@ import (
 
 	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/ipn/ipnlocal/netmapcache"
-	"tailscale.com/tailcfg"
 	"tailscale.com/types/netmap"
 )
 
@@ -22,43 +21,21 @@ type diskCache struct {
 	cache *netmapcache.Cache
 }
 
-// writePeerDeltaToDiskLocked applies the specified peer delta to the cache,
-// leaving other existing cached fields (self, profiles, other peers not
-// mentioned in the arguments) unchanged.  It does nothing (without error) if
-// both slices are empty.
-func (b *LocalBackend) writePeerDeltaToDiskLocked(update []tailcfg.NodeView, remove []tailcfg.StableNodeID) error {
-	if !buildfeatures.HasCacheNetMap || (len(update) == 0 && len(remove) == 0) {
-		return nil
-	} else if err := b.ensureDiskCacheLocked(); err != nil {
-		return err
-	}
-	// Do not log this, we get deltas all the time and it's very noisy.
-	return b.diskCache.cache.UpdatePeers(b.currentNode().Context(), update, remove)
-}
-
-// writeNetmapToDiskLockedWithoutPeers updates nm in the cache, excluding peers and profiles.
-func (b *LocalBackend) writeNetmapToDiskLockedWithoutPeers(nm *netmap.NetworkMap) error {
+func (b *LocalBackend) writeNetmapToDiskLocked(nm *netmap.NetworkMap) error {
 	if !buildfeatures.HasCacheNetMap || nm == nil || nm.Cached {
 		return nil
-	} else if err := b.ensureDiskCacheLocked(); err != nil {
-		return err
-	}
-	b.logf("updating netmap in disk cache")
-	return b.diskCache.cache.UpdateSelfOnly(b.currentNode().Context(), b.patchNetmapHomeDERPLocked(nm))
-}
-
-// writeNetmapToDiskLockedWithPeers writes nm into the cache, including peers and profiles.
-func (b *LocalBackend) writeNetmapToDiskLockedWithPeers(nm *netmap.NetworkMap) error {
-	if !buildfeatures.HasCacheNetMap || nm == nil || nm.Cached {
-		return nil
-	} else if err := b.ensureDiskCacheLocked(); err != nil {
-		return err
 	}
 	b.logf("writing netmap to disk cache")
-	return b.diskCache.cache.Store(b.currentNode().Context(), b.patchNetmapHomeDERPLocked(nm))
-}
 
-func (b *LocalBackend) patchNetmapHomeDERPLocked(nm *netmap.NetworkMap) *netmap.NetworkMap {
+	dir, err := b.profileMkdirAllLocked(b.pm.CurrentProfile().ID(), "netmap-cache")
+	if err != nil {
+		return err
+	}
+	if c := b.diskCache; c.cache == nil || c.dir != dir {
+		b.diskCache.cache = netmapcache.NewCache(netmapcache.FileStore(dir))
+		b.diskCache.dir = dir
+	}
+
 	// Set the homeDERP on the self node before saving. The self node homeDERP is
 	// generally not used since the homeDERP for self is stored in magicsock, but
 	// to be able to load it during loading the cache, we use the existing field
@@ -69,19 +46,8 @@ func (b *LocalBackend) patchNetmapHomeDERPLocked(nm *netmap.NetworkMap) *netmap.
 	selfNode := nm.SelfNode.AsStruct()
 	selfNode.HomeDERP = int(b.currentNode().homeDERP.Load())
 	nmCopy.SelfNode = selfNode.View()
-	return &nmCopy
-}
 
-func (b *LocalBackend) ensureDiskCacheLocked() error {
-	dir, err := b.profileMkdirAllLocked(b.pm.CurrentProfile().ID(), "netmap-cache")
-	if err != nil {
-		return err
-	}
-	if c := b.diskCache; c.cache == nil || c.dir != dir {
-		b.diskCache.cache = netmapcache.NewCache(netmapcache.FileStore(dir))
-		b.diskCache.dir = dir
-	}
-	return nil
+	return b.diskCache.cache.Store(b.currentNode().Context(), &nmCopy)
 }
 
 func (b *LocalBackend) loadDiskCacheLocked() (om *netmap.NetworkMap, ok bool) {

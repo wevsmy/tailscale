@@ -18,22 +18,17 @@ import (
 	"tailscale.com/types/tkatype"
 )
 
-// TailnetLockStatus fetches information about the tailnet key authority, if one is configured.
-func (lc *Client) TailnetLockStatus(ctx context.Context) (*ipnstate.TailnetLockStatus, error) {
+// NetworkLockStatus fetches information about the tailnet key authority, if one is configured.
+func (lc *Client) NetworkLockStatus(ctx context.Context) (*ipnstate.NetworkLockStatus, error) {
 	body, err := lc.send(ctx, "GET", "/localapi/v0/tka/status", 200, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error: %w", err)
 	}
-	return decodeJSON[*ipnstate.TailnetLockStatus](body)
+	return decodeJSON[*ipnstate.NetworkLockStatus](body)
 }
 
-// Deprecated: use [Client.TailnetLockStatus] instead.
-func (lc *Client) NetworkLockStatus(ctx context.Context) (*ipnstate.TailnetLockStatus, error) {
-	return lc.TailnetLockStatus(ctx)
-}
-
-// TailnetLockInit initializes the tailnet key authority.
-func (lc *Client) TailnetLockInit(ctx context.Context, keys []tka.Key, disablementValues [][]byte, supportDisablement []byte) (*ipnstate.TailnetLockStatus, error) {
+// NetworkLockInit initializes the tailnet key authority.
+func (lc *Client) NetworkLockInit(ctx context.Context, keys []tka.Key, disablementValues [][]byte, supportDisablement []byte) (*ipnstate.NetworkLockStatus, error) {
 	var b bytes.Buffer
 	type initRequest struct {
 		Keys               []tka.Key
@@ -49,17 +44,12 @@ func (lc *Client) TailnetLockInit(ctx context.Context, keys []tka.Key, disableme
 	if err != nil {
 		return nil, fmt.Errorf("error: %w", err)
 	}
-	return decodeJSON[*ipnstate.TailnetLockStatus](body)
+	return decodeJSON[*ipnstate.NetworkLockStatus](body)
 }
 
-// Deprecated: use [Client.TailnetLockInit] instead.
-func (lc *Client) NetworkLockInit(ctx context.Context, keys []tka.Key, disablementValues [][]byte, supportDisablement []byte) (*ipnstate.TailnetLockStatus, error) {
-	return lc.TailnetLockInit(ctx, keys, disablementValues, supportDisablement)
-}
-
-// TailnetLockWrapPreauthKey wraps a pre-auth key with information to
+// NetworkLockWrapPreauthKey wraps a pre-auth key with information to
 // enable unattended bringup in the locked tailnet.
-func (lc *Client) TailnetLockWrapPreauthKey(ctx context.Context, preauthKey string, tkaKey key.NLPrivate) (string, error) {
+func (lc *Client) NetworkLockWrapPreauthKey(ctx context.Context, preauthKey string, tkaKey key.NLPrivate) (string, error) {
 	encodedPrivate, err := tkaKey.MarshalText()
 	if err != nil {
 		return "", err
@@ -81,13 +71,8 @@ func (lc *Client) TailnetLockWrapPreauthKey(ctx context.Context, preauthKey stri
 	return string(body), nil
 }
 
-// Deprecated: use [Client.TailnetLockWrapPreauthKey] instead.
-func (lc *Client) NetworkLockWrapPreauthKey(ctx context.Context, preauthKey string, tkaKey key.NLPrivate) (string, error) {
-	return lc.TailnetLockWrapPreauthKey(ctx, preauthKey, tkaKey)
-}
-
-// TailnetLockModify adds and/or removes key(s) to the tailnet key authority.
-func (lc *Client) TailnetLockModify(ctx context.Context, addKeys, removeKeys []tka.Key) error {
+// NetworkLockModify adds and/or removes key(s) to the tailnet key authority.
+func (lc *Client) NetworkLockModify(ctx context.Context, addKeys, removeKeys []tka.Key) error {
 	var b bytes.Buffer
 	type modifyRequest struct {
 		AddKeys    []tka.Key
@@ -104,14 +89,9 @@ func (lc *Client) TailnetLockModify(ctx context.Context, addKeys, removeKeys []t
 	return nil
 }
 
-// Deprecated: use [Client.TailnetLockModify] instead.
-func (lc *Client) NetworkLockModify(ctx context.Context, addKeys, removeKeys []tka.Key) error {
-	return lc.TailnetLockModify(ctx, addKeys, removeKeys)
-}
-
-// TailnetLockSign signs the specified node-key and transmits that signature to the control plane.
+// NetworkLockSign signs the specified node-key and transmits that signature to the control plane.
 // rotationPublic, if specified, must be an ed25519 public key.
-func (lc *Client) TailnetLockSign(ctx context.Context, nodeKey key.NodePublic, rotationPublic []byte) error {
+func (lc *Client) NetworkLockSign(ctx context.Context, nodeKey key.NodePublic, rotationPublic []byte) error {
 	var b bytes.Buffer
 	type signRequest struct {
 		NodeKey        key.NodePublic
@@ -128,13 +108,8 @@ func (lc *Client) TailnetLockSign(ctx context.Context, nodeKey key.NodePublic, r
 	return nil
 }
 
-// Deprecated: use [Client.TailnetLockSign] instead.
-func (lc *Client) NetworkLockSign(ctx context.Context, nodeKey key.NodePublic, rotationPublic []byte) error {
-	return lc.TailnetLockSign(ctx, nodeKey, rotationPublic)
-}
-
-// TailnetLockAffectedSigs returns all signatures signed by the specified keyID.
-func (lc *Client) TailnetLockAffectedSigs(ctx context.Context, keyID tkatype.KeyID) ([]tkatype.MarshaledSignature, error) {
+// NetworkLockAffectedSigs returns all signatures signed by the specified keyID.
+func (lc *Client) NetworkLockAffectedSigs(ctx context.Context, keyID tkatype.KeyID) ([]tkatype.MarshaledSignature, error) {
 	body, err := lc.send(ctx, "POST", "/localapi/v0/tka/affected-sigs", 200, bytes.NewReader(keyID))
 	if err != nil {
 		return nil, fmt.Errorf("error: %w", err)
@@ -142,29 +117,19 @@ func (lc *Client) TailnetLockAffectedSigs(ctx context.Context, keyID tkatype.Key
 	return decodeJSON[[]tkatype.MarshaledSignature](body)
 }
 
-// Deprecated: use [Client.TailnetLockAffectedSigs] instead.
-func (lc *Client) NetworkLockAffectedSigs(ctx context.Context, keyID tkatype.KeyID) ([]tkatype.MarshaledSignature, error) {
-	return lc.TailnetLockAffectedSigs(ctx, keyID)
-}
-
-// TailnetLockLog returns up to maxEntries number of changes to tailnet-lock state.
-func (lc *Client) TailnetLockLog(ctx context.Context, maxEntries int) ([]ipnstate.TailnetLockUpdate, error) {
+// NetworkLockLog returns up to maxEntries number of changes to network-lock state.
+func (lc *Client) NetworkLockLog(ctx context.Context, maxEntries int) ([]ipnstate.NetworkLockUpdate, error) {
 	v := url.Values{}
 	v.Set("limit", fmt.Sprint(maxEntries))
 	body, err := lc.send(ctx, "GET", "/localapi/v0/tka/log?"+v.Encode(), 200, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error %w: %s", err, body)
 	}
-	return decodeJSON[[]ipnstate.TailnetLockUpdate](body)
+	return decodeJSON[[]ipnstate.NetworkLockUpdate](body)
 }
 
-// Deprecated: use [Client.TailnetLockLog] instead.
-func (lc *Client) NetworkLockLog(ctx context.Context, maxEntries int) ([]ipnstate.TailnetLockUpdate, error) {
-	return lc.TailnetLockLog(ctx, maxEntries)
-}
-
-// TailnetLockForceLocalDisable forcibly shuts down tailnet lock on this node.
-func (lc *Client) TailnetLockForceLocalDisable(ctx context.Context) error {
+// NetworkLockForceLocalDisable forcibly shuts down network lock on this node.
+func (lc *Client) NetworkLockForceLocalDisable(ctx context.Context) error {
 	// This endpoint expects an empty JSON stanza as the payload.
 	var b bytes.Buffer
 	if err := json.NewEncoder(&b).Encode(struct{}{}); err != nil {
@@ -177,14 +142,9 @@ func (lc *Client) TailnetLockForceLocalDisable(ctx context.Context) error {
 	return nil
 }
 
-// Deprecated: use [Client.TailnetLockForceLocalDisable] instead.
-func (lc *Client) NetworkLockForceLocalDisable(ctx context.Context) error {
-	return lc.TailnetLockForceLocalDisable(ctx)
-}
-
-// TailnetLockVerifySigningDeeplink verifies the tailnet lock deeplink contained
+// NetworkLockVerifySigningDeeplink verifies the network lock deeplink contained
 // in url and returns information extracted from it.
-func (lc *Client) TailnetLockVerifySigningDeeplink(ctx context.Context, url string) (*tka.DeeplinkValidationResult, error) {
+func (lc *Client) NetworkLockVerifySigningDeeplink(ctx context.Context, url string) (*tka.DeeplinkValidationResult, error) {
 	vr := struct {
 		URL string
 	}{url}
@@ -197,13 +157,8 @@ func (lc *Client) TailnetLockVerifySigningDeeplink(ctx context.Context, url stri
 	return decodeJSON[*tka.DeeplinkValidationResult](body)
 }
 
-// Deprecated: use [Client.TailnetLockVerifySigningDeeplink] instead.
-func (lc *Client) NetworkLockVerifySigningDeeplink(ctx context.Context, url string) (*tka.DeeplinkValidationResult, error) {
-	return lc.TailnetLockVerifySigningDeeplink(ctx, url)
-}
-
-// TailnetLockGenRecoveryAUM generates an AUM for recovering from a tailnet-lock key compromise.
-func (lc *Client) TailnetLockGenRecoveryAUM(ctx context.Context, removeKeys []tkatype.KeyID, forkFrom tka.AUMHash) ([]byte, error) {
+// NetworkLockGenRecoveryAUM generates an AUM for recovering from a tailnet-lock key compromise.
+func (lc *Client) NetworkLockGenRecoveryAUM(ctx context.Context, removeKeys []tkatype.KeyID, forkFrom tka.AUMHash) ([]byte, error) {
 	vr := struct {
 		Keys     []tkatype.KeyID
 		ForkFrom string
@@ -217,13 +172,8 @@ func (lc *Client) TailnetLockGenRecoveryAUM(ctx context.Context, removeKeys []tk
 	return body, nil
 }
 
-// Deprecated: use [Client.TailnetLockGenRecoveryAUM] instead.
-func (lc *Client) NetworkLockGenRecoveryAUM(ctx context.Context, removeKeys []tkatype.KeyID, forkFrom tka.AUMHash) ([]byte, error) {
-	return lc.TailnetLockGenRecoveryAUM(ctx, removeKeys, forkFrom)
-}
-
-// TailnetLockCosignRecoveryAUM co-signs a recovery AUM using the node's tailnet lock key.
-func (lc *Client) TailnetLockCosignRecoveryAUM(ctx context.Context, aum tka.AUM) ([]byte, error) {
+// NetworkLockCosignRecoveryAUM co-signs a recovery AUM using the node's tailnet lock key.
+func (lc *Client) NetworkLockCosignRecoveryAUM(ctx context.Context, aum tka.AUM) ([]byte, error) {
 	r := bytes.NewReader(aum.Serialize())
 	body, err := lc.send(ctx, "POST", "/localapi/v0/tka/cosign-recovery-aum", 200, r)
 	if err != nil {
@@ -233,13 +183,8 @@ func (lc *Client) TailnetLockCosignRecoveryAUM(ctx context.Context, aum tka.AUM)
 	return body, nil
 }
 
-// Deprecated: use [Client.TailnetLockCosignRecoveryAUM] instead.
-func (lc *Client) NetworkLockCosignRecoveryAUM(ctx context.Context, aum tka.AUM) ([]byte, error) {
-	return lc.TailnetLockCosignRecoveryAUM(ctx, aum)
-}
-
-// TailnetLockSubmitRecoveryAUM submits a recovery AUM to the control plane.
-func (lc *Client) TailnetLockSubmitRecoveryAUM(ctx context.Context, aum tka.AUM) error {
+// NetworkLockSubmitRecoveryAUM submits a recovery AUM to the control plane.
+func (lc *Client) NetworkLockSubmitRecoveryAUM(ctx context.Context, aum tka.AUM) error {
 	r := bytes.NewReader(aum.Serialize())
 	_, err := lc.send(ctx, "POST", "/localapi/v0/tka/submit-recovery-aum", 200, r)
 	if err != nil {
@@ -248,20 +193,10 @@ func (lc *Client) TailnetLockSubmitRecoveryAUM(ctx context.Context, aum tka.AUM)
 	return nil
 }
 
-// Deprecated: use [Client.TailnetLockSubmitRecoveryAUM] instead.
-func (lc *Client) NetworkLockSubmitRecoveryAUM(ctx context.Context, aum tka.AUM) error {
-	return lc.TailnetLockSubmitRecoveryAUM(ctx, aum)
-}
-
-// TailnetLockDisable shuts down tailnet-lock across the tailnet.
-func (lc *Client) TailnetLockDisable(ctx context.Context, secret []byte) error {
+// NetworkLockDisable shuts down network-lock across the tailnet.
+func (lc *Client) NetworkLockDisable(ctx context.Context, secret []byte) error {
 	if _, err := lc.send(ctx, "POST", "/localapi/v0/tka/disable", 200, bytes.NewReader(secret)); err != nil {
 		return fmt.Errorf("error: %w", err)
 	}
 	return nil
-}
-
-// Deprecated: use [Client.TailnetLockDisable] instead.
-func (lc *Client) NetworkLockDisable(ctx context.Context, secret []byte) error {
-	return lc.TailnetLockDisable(ctx, secret)
 }

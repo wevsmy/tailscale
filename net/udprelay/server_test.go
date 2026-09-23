@@ -214,7 +214,7 @@ func TestServer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := new(usermetric.Registry)
 			deregisterMetrics()
-			server, err := NewServer(t.Logf, 0, true, reg, nil)
+			server, err := NewServer(t.Logf, 0, true, reg)
 			if err != nil {
 				t.Fatal(err)
 			}

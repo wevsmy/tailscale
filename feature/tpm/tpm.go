@@ -243,11 +243,8 @@ func (s *tpmStore) WriteState(k ipn.StateKey, bs []byte) error {
 	if bytes.Equal(s.cache[k], bs) {
 		return nil
 	}
-	if bs == nil {
-		delete(s.cache, k)
-	} else {
-		s.cache[k] = bytes.Clone(bs)
-	}
+	s.cache[k] = bytes.Clone(bs)
+
 	return s.writeSealed()
 }
 

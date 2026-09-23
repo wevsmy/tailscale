@@ -216,7 +216,6 @@ type Impl struct {
 	dialer    *tsdial.Dialer
 	ctx       context.Context        // alive until Close
 	ctxCancel context.CancelFunc     // called on Close
-	injectWG  sync.WaitGroup         // wait for the inject goroutine
 	lb        *ipnlocal.LocalBackend // or nil
 	dns       *dns.Manager
 
@@ -451,7 +450,6 @@ func (ns *Impl) Close() error {
 	ns.ctxCancel()
 	ns.ipstack.Close()
 	ns.ipstack.Wait()
-	ns.injectWG.Wait()
 	return nil
 }
 
@@ -646,9 +644,7 @@ func (ns *Impl) Start(b LocalBackend) error {
 	udpFwd := udp.NewForwarder(ns.ipstack, ns.acceptUDPNoICMP)
 	ns.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, ns.wrapTCPProtocolHandler(tcpFwd.HandlePacket))
 	ns.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, ns.wrapUDPProtocolHandler(udpFwd.HandlePacket))
-	ns.injectWG.Go(func() {
-		ns.inject()
-	})
+	go ns.inject()
 	if ns.ready.Swap(true) {
 		panic("already started")
 	}
@@ -835,6 +831,64 @@ func (ns *Impl) isLoopbackPort(port uint16) bool {
 	return false
 }
 
+// handleDNSResponse intercepts DNS responses from netstack and rewrites the source
+// address back to the original DNS server that the client queried.
+// handleDNSQueryCopy processes a DNS query and sends the response back to the client.
+// This is called in a goroutine to avoid blocking the packet processing path.
+func (ns *Impl) handleDNSQueryCopy(query []byte, src, dst netip.AddrPort, ipVersion uint8, proto ipproto.Proto) {
+	// Query Tailscale DNS with timeout
+	ctx, cancel := context.WithTimeout(ns.ctx, 5*time.Second)
+	defer cancel()
+	
+	protoStr := "udp"
+	if proto == ipproto.TCP {
+		protoStr = "tcp"
+	}
+	
+	resp, err := ns.dns.Query(ctx, query, protoStr, src)
+	if err != nil {
+		if debugPackets {
+			ns.logf("DNS hijack query failed: %v", err)
+		}
+		return
+	}
+
+	// Build response packet using packet.Generate
+	// Response goes FROM queried DNS server TO client
+	var respPacket []byte
+	switch ipVersion {
+	case 4:
+		h := packet.UDP4Header{
+			IP4Header: packet.IP4Header{
+				Src:  dst.Addr(),
+				Dst:  src.Addr(),
+				IPID: 0,
+			},
+			SrcPort: dst.Port(),
+			DstPort: src.Port(),
+		}
+		respPacket = packet.Generate(&h, resp)
+	case 6:
+		h := packet.UDP6Header{
+			IP6Header: packet.IP6Header{
+				Src: dst.Addr(),
+				Dst: src.Addr(),
+			},
+			SrcPort: dst.Port(),
+			DstPort: src.Port(),
+		}
+		respPacket = packet.Generate(&h, resp)
+	default:
+		return
+	}
+
+	// Inject response back to TUN
+	if err := ns.tundev.InjectInboundCopy(respPacket); err != nil && debugPackets {
+		ns.logf("DNS hijack inject failed: %v", err)
+	}
+}
+
+// buildUDPResponse4 builds an IPv4 UDP packet with the given parameters
 // handleLocalPackets is hooked into the tun datapath for packets leaving
 // the host and arriving at tailscaled. This method returns filter.DropSilently
 // to intercept a packet for handling, for instance traffic to quad-100.
@@ -842,6 +896,24 @@ func (ns *Impl) isLoopbackPort(port uint16) bool {
 func (ns *Impl) handleLocalPackets(p *packet.Parsed, t *tstun.Wrapper, gro *gro.GRO) (filter.Response, *gro.GRO) {
 	if !ns.ready.Load() || ns.ctx.Err() != nil {
 		return filter.DropSilently, gro
+	}
+
+	// Hijack DNS queries to external servers if CorpDNS is enabled
+	if p.Dst.Port() == 53 && (p.IPProto == ipproto.UDP || p.IPProto == ipproto.TCP) {
+		dst := p.Dst.Addr()
+		// Skip hijacking for queries to Tailscale DNS itself
+		if dst != serviceIP && dst != serviceIPv6 {
+			// Only hijack if CorpDNS is enabled (--accept-dns=true)
+			if ns.lb != nil && ns.lb.Prefs().CorpDNS() {
+				// Copy and process DNS query in goroutine
+				if query := p.Payload(); len(query) > 0 {
+					queryCopy := make([]byte, len(query))
+					copy(queryCopy, query)
+					go ns.handleDNSQueryCopy(queryCopy, p.Src, p.Dst, p.IPVersion, p.IPProto)
+				}
+				return filter.DropSilently, gro
+			}
+		}
 	}
 
 	// Determine if we care about this local packet.
@@ -1441,16 +1513,6 @@ func (ns *Impl) injectInbound(p *packet.Parsed, t *tstun.Wrapper, gro *gro.GRO) 
 	return filter.DropSilently, gro
 }
 
-// metricViaHostScopedDrop counts refused 4via6 forwards to host-scoped targets.
-var metricViaHostScopedDrop = clientmetric.NewCounter("netstack_via_host_scoped_dropped")
-
-// shouldForwardToVia reports whether a flow to the 4via6 destination via may
-// be forwarded to the embedded IPv4 target. The packet filter only sees the
-// outer via address, so this is the sole check on the embedded target.
-func (ns *Impl) shouldForwardToVia(via netip.Addr) bool {
-	return ns.lb != nil && ns.lb.ShouldForwardToVia(via)
-}
-
 // shouldHandlePing returns whether or not netstack should handle an incoming
 // ICMP echo request packet, and the IP address that should be pinged from this
 // process. The IP address can be different from the destination in the packet
@@ -1484,15 +1546,7 @@ func (ns *Impl) shouldHandlePing(p *packet.Parsed) (_ netip.Addr, ok bool) {
 		// IPv4 and expect to get a useful result. However, in this specific
 		// case things are safe because the 'userPing' function doesn't make
 		// use of the input packet.
-		unmapped := tsaddr.UnmapVia(destIP)
-		if !ns.shouldForwardToVia(destIP) {
-			// Don't relay pings to host-scoped targets: a relayed reply
-			// would reveal which LAN addresses are reachable from this
-			// node, aiding network reconnaissance.
-			metricViaHostScopedDrop.Add(1)
-			return netip.Addr{}, false
-		}
-		return unmapped, true
+		return tsaddr.UnmapVia(destIP), true
 	}
 
 	// If we get here, we don't do anything unless this netstack instance
@@ -1560,11 +1614,8 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 
 	dstAddrPort := netip.AddrPortFrom(dialIP, reqDetails.LocalPort)
 
-	isVia := viaRange.Contains(dialIP)
-	var viaIP netip.Addr
-	if isVia {
+	if viaRange.Contains(dialIP) {
 		isTailscaleIP = false
-		viaIP = dialIP
 		dialIP = tsaddr.UnmapVia(dialIP)
 	}
 
@@ -1575,15 +1626,6 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 			ns.removeSubnetAddress(dialIP)
 		}
 	}()
-
-	if isVia && !ns.shouldForwardToVia(viaIP) {
-		// Refuse host-scoped 4via6 targets with a RST
-		metricViaHostScopedDrop.Add(1)
-		ns.logf("netstack: rejecting TCP connection to host-scoped 4via6 target %v from %v",
-			netip.AddrPortFrom(dialIP, reqDetails.LocalPort), clientRemoteAddrPort)
-		r.Complete(true) // sends a RST
-		return
-	}
 
 	var wq waiter.Queue
 
@@ -1711,17 +1753,6 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 		// whatever random service happens to be listening on the
 		// host's loopback at that port. Reject cleanly with a RST
 		// here instead.
-		r.Complete(true) // sends a RST
-		return
-	case ns.isVIPServiceIP(dialIP):
-		// TCP to a VIP service IP on a port the service does not serve. A served
-		// port returns early above (TCPHandlerForDst is non-nil), so reaching here
-		// means this node has no serve handler for this port. Don't fall through
-		// to the isTailscaleIP case below (a VIP is in the Tailscale IP range),
-		// which would rewrite the dial target to 127.0.0.1:<port> and forwardTCP
-		// the connection onto whatever unrelated service happens to be listening
-		// on the host's loopback at that port — reachable via the service IP by
-		// any peer, even one granted access only to the service. Reject with a RST.
 		r.Complete(true) // sends a RST
 		return
 	case isTailscaleIP:
@@ -2077,15 +2108,6 @@ func (ns *Impl) forwardUDP(client *gonet.UDPConn, clientAddr, dstAddr netip.Addr
 		backendListenAddr = &net.UDPAddr{IP: ip, Port: int(srcPort)}
 	} else {
 		if dstIP := dstAddr.Addr(); viaRange.Contains(dstIP) {
-			if !ns.shouldForwardToVia(dstIP) {
-				// Close the client endpoint: the guard is attacker-triggerable
-				// per packet, so a bare return would leak gVisor endpoints.
-				metricViaHostScopedDrop.Add(1)
-				ns.logf("netstack: dropping UDP flow to host-scoped 4via6 target %v from %v",
-					netip.AddrPortFrom(tsaddr.UnmapVia(dstIP), dstAddr.Port()), clientAddr)
-				client.Close()
-				return
-			}
 			dstAddr = netip.AddrPortFrom(tsaddr.UnmapVia(dstIP), dstAddr.Port())
 		}
 		backendRemoteAddr = net.UDPAddrFromAddrPort(dstAddr)

@@ -85,23 +85,23 @@ func TestHostFileChanged(t *testing.T) {
 }
 
 func TestManagerWindowsLocal(t *testing.T) {
-	if !winutil.IsCurrentProcessLocalSystem() {
-		t.Skipf("test requires running as LocalSystem on Windows 10+")
+	if !isWindows10OrBetter() || !winutil.IsCurrentProcessElevated() {
+		t.Skipf("test requires running as elevated user on Windows 10+")
 	}
 
 	runTest(t, true)
 }
 
 func TestManagerWindowsGP(t *testing.T) {
-	if !winutil.IsCurrentProcessLocalSystem() {
-		t.Skipf("test requires running as LocalSystem on Windows 10+")
+	if !isWindows10OrBetter() || !winutil.IsCurrentProcessElevated() {
+		t.Skipf("test requires running as elevated user on Windows 10+")
 	}
 
 	checkGPNotificationsWork(t)
 
-	// Make sure group policy is current before this test exits but after we've
+	// Make sure group policy is refreshed before this test exits but after we've
 	// cleaned everything else up.
-	defer gp.NotifyMachinePolicyChange()
+	defer gp.RefreshMachinePolicy(true)
 
 	err := createFakeGPKey()
 	if err != nil {
@@ -113,8 +113,8 @@ func TestManagerWindowsGP(t *testing.T) {
 }
 
 func TestManagerWindowsGPCopy(t *testing.T) {
-	if !winutil.IsCurrentProcessLocalSystem() {
-		t.Skipf("test requires running as LocalSystem on Windows 10+")
+	if !isWindows10OrBetter() || !winutil.IsCurrentProcessElevated() {
+		t.Skipf("test requires running as elevated user on Windows 10+")
 	}
 
 	checkGPNotificationsWork(t)
@@ -179,9 +179,9 @@ func TestManagerWindowsGPCopy(t *testing.T) {
 		t.Fatalf("regWatcher.watch: %v\n", err)
 	}
 
-	err = gp.NotifyMachinePolicyChange()
+	err = gp.RefreshMachinePolicy(true)
 	if err != nil {
-		t.Fatalf("NotifyMachinePolicyChange: %v\n", err)
+		t.Fatalf("testDoRefresh: %v\n", err)
 	}
 
 	err = regWatcher.wait()
@@ -203,9 +203,9 @@ func TestManagerWindowsGPCopy(t *testing.T) {
 		t.Fatalf("regWatcher.watch: %v\n", err)
 	}
 
-	err = gp.NotifyMachinePolicyChange()
+	err = gp.RefreshMachinePolicy(true)
 	if err != nil {
-		t.Fatalf("NotifyMachinePolicyChange: %v\n", err)
+		t.Fatalf("testDoRefresh: %v\n", err)
 	}
 
 	err = regWatcher.wait()
@@ -236,13 +236,13 @@ func checkGPNotificationsWork(t *testing.T) {
 	}
 	defer trk.Close()
 
-	err = gp.NotifyMachinePolicyChange()
+	err = gp.RefreshMachinePolicy(true)
 	if err != nil {
-		t.Fatalf("NotifyMachinePolicyChange error: %v\n", err)
+		t.Fatalf("RefreshPolicyEx error: %v\n", err)
 	}
 
 	timeout := uint32(10000) // Milliseconds
-	if !trk.DidGroupPolicyChangeTimeout(timeout) {
+	if !trk.DidRefreshTimeout(timeout) {
 		t.Skipf("GP notifications are not working on this machine\n")
 	}
 }
@@ -338,13 +338,17 @@ func runTest(t *testing.T, isLocal bool) {
 		}
 		validateRegistry(t, regBaseValidate, caseDomains)
 		ensureNoRulesInSubkey(t, regBaseEnsure)
-		if !isLocal && !trk.DidGroupPolicyChange(true) {
-			t.Fatalf("DidGroupPolicyChange false, want true\n")
+		if !isLocal && !trk.DidRefresh(true) {
+			t.Fatalf("DidRefresh false, want true\n")
 		}
 	}
 
 	for _, n := range cases {
 		runCase(n)
+	}
+
+	if isLocal && trk.DidRefresh(false) {
+		t.Errorf("DidRefresh true, want false\n")
 	}
 
 	t.Logf("Test case: nil resolver\n")
@@ -569,7 +573,7 @@ var (
 )
 
 // gpNotificationTracker registers with the Windows policy engine and receives
-// notifications when policy change notifications occur.
+// notifications when policy refreshes occur.
 type gpNotificationTracker struct {
 	event windows.Handle
 }
@@ -598,7 +602,7 @@ func newGPNotificationTracker() (*gpNotificationTracker, error) {
 	return &gpNotificationTracker{evt}, nil
 }
 
-func (trk *gpNotificationTracker) DidGroupPolicyChange(isExpected bool) bool {
+func (trk *gpNotificationTracker) DidRefresh(isExpected bool) bool {
 	// If we're not expecting a refresh event, then we need to use a timeout.
 	timeout := uint32(1000) // 1 second (in milliseconds)
 	if isExpected {
@@ -606,10 +610,10 @@ func (trk *gpNotificationTracker) DidGroupPolicyChange(isExpected bool) bool {
 		timeout = windows.INFINITE
 	}
 
-	return trk.DidGroupPolicyChangeTimeout(timeout)
+	return trk.DidRefreshTimeout(timeout)
 }
 
-func (trk *gpNotificationTracker) DidGroupPolicyChangeTimeout(timeout uint32) bool {
+func (trk *gpNotificationTracker) DidRefreshTimeout(timeout uint32) bool {
 	waitCode, _ := windows.WaitForSingleObject(trk.event, timeout)
 	return waitCode == windows.WAIT_OBJECT_0
 }
@@ -620,8 +624,6 @@ func (trk *gpNotificationTracker) Close() error {
 	trk.event = 0
 	return nil
 }
-
-const dnsBaseGP = `SOFTWARE\Policies\Microsoft\Windows NT\DNSClient`
 
 type regKeyWatcher struct {
 	keyGP registry.Key

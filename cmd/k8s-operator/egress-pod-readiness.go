@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/netip"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -24,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
 	tsapi "tailscale.com/k8s-operator/apis/v1alpha1"
 	"tailscale.com/kube/kubetypes"
 	"tailscale.com/tstime"
@@ -89,9 +87,8 @@ func (er *egressPodsReconciler) Reconcile(ctx context.Context, req reconcile.Req
 		lg.Debugf("Pod is being deleted, do nothing")
 		return res, nil
 	}
-
 	if pod.Labels[LabelParentType] != proxyTypeProxyGroup {
-		lg.Warn("reconciler called for a Pod that is not a ProxyGroup Pod")
+		lg.Infof("[unexpected] reconciler called for a Pod that is not a ProxyGroup Pod")
 		return res, nil
 	}
 
@@ -109,12 +106,10 @@ func (er *egressPodsReconciler) Reconcile(ctx context.Context, req reconcile.Req
 	if err := er.Get(ctx, types.NamespacedName{Name: proxyGroupName}, pg); err != nil {
 		return res, fmt.Errorf("error getting ProxyGroup %q: %w", proxyGroupName, err)
 	}
-
 	if pg.Spec.Type != typeEgress {
-		lg.Warnf("reconciler called for %q ProxyGroup Pod", pg.Spec.Type)
+		lg.Infof("[unexpected] reconciler called for %q ProxyGroup Pod", pg.Spec.Type)
 		return res, nil
 	}
-
 	// Get all ClusterIP Services for all egress targets exposed to cluster via this ProxyGroup.
 	lbls := map[string]string{
 		kubetypes.LabelManaged: "true",
@@ -228,23 +223,12 @@ func (er *egressPodsReconciler) lookupPodRouteViaSvc(ctx context.Context, pod *c
 		lg.Debugf("Pod does not have health check enabled, unable to verify if it is currently routable via Service")
 		return cannotVerify, nil
 	}
-	// Use the Pod's primary IP (PodIPs[0]) to identify this Pod in the health check
-	// response. The primary IP family is determined by the cluster's IP family configuration.
-
-	// Note: we do not control which IP family the request uses, so on a dual-stack
-	// cluster either IPv4 or IPv6 could be used. In either case, a matching IP header
-	// comfirms the request reached this Pod.
-	if len(pod.Status.PodIPs) == 0 || pod.Status.PodIPs[0].IP == "" {
-		return podNotReady, nil
-	}
-	wantsIP := pod.Status.PodIPs[0].IP
-	parsed, err := netip.ParseAddr(wantsIP)
+	wantsIP, err := podIPv4(pod)
 	if err != nil {
-		return -1, fmt.Errorf("error parsing Pod IP %q: %w", wantsIP, err)
+		return -1, fmt.Errorf("error determining Pod's IP address: %w", err)
 	}
-	header := kubetypes.PodIPv4Header
-	if parsed.Is6() {
-		header = kubetypes.PodIPv6Header
+	if wantsIP == "" {
+		return podNotReady, nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, time.Second*3)
@@ -262,7 +246,7 @@ func (er *egressPodsReconciler) lookupPodRouteViaSvc(ctx context.Context, pod *c
 		return unreachable, nil
 	}
 	defer resp.Body.Close()
-	gotIP := resp.Header.Get(header)
+	gotIP := resp.Header.Get(kubetypes.PodIPv4Header)
 	if gotIP == "" {
 		lg.Debugf("Health check does not return Pod's IP header, unable to verify if Pod is currently routable via Service")
 		return cannotVerify, nil

@@ -145,6 +145,7 @@ func (v PrefsView) NetfilterKind() prefs.Item[string] { return v.ж.NetfilterKin
 func (v PrefsView) DriveShares() prefs.StructListView[*drive.Share, drive.ShareView] {
 	return prefs.StructListViewOf(&v.ж.DriveShares)
 }
+func (v PrefsView) AllowSingleHosts() prefs.Item[marshalAsTrueInJSON] { return v.ж.AllowSingleHosts }
 
 // Persist is an internal state rather than a preference.
 // It can be kept in the Prefs structure but should not be wrapped
@@ -181,6 +182,7 @@ var _PrefsViewNeedsRegeneration = Prefs(struct {
 	PostureChecking        prefs.Item[bool]
 	NetfilterKind          prefs.Item[string]
 	DriveShares            prefs.StructList[*drive.Share]
+	AllowSingleHosts       prefs.Item[marshalAsTrueInJSON]
 	Persist                *persist.Persist
 }{})
 

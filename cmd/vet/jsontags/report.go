@@ -74,7 +74,7 @@ const (
 	OmitEmptyShouldBeOmitZero             ReportKind = "OmitEmptyShouldBeOmitZero"
 	OmitEmptyShouldBeOmitZeroButHasIsZero ReportKind = "OmitEmptyShouldBeOmitZeroButHasIsZero"
 	StringOnNonNumericKind                ReportKind = "StringOnNonNumericKind"
-	FormatUnsupported                     ReportKind = "FormatUnsupported"
+	FormatMissingOnTimeDuration           ReportKind = "FormatMissingOnTimeDuration"
 )
 
 func (k ReportKind) message() string {
@@ -89,8 +89,8 @@ func (k ReportKind) message() string {
 		return "should probably use `omitzero` instead of `omitempty`"
 	case StringOnNonNumericKind:
 		return "must not use `string` on non-numeric types"
-	case FormatUnsupported:
-		return "must not use the `format` tag option; Go 1.27's encoding/json rejects it at runtime (see tailscale/tailscale#20528)"
+	case FormatMissingOnTimeDuration:
+		return "must use an explicit `format` tag (e.g., `format:nano`) on a time.Duration type; see https://go.dev/issue/71631"
 	default:
 		return string(k)
 	}

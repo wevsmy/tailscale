@@ -26,15 +26,6 @@ func (b *LocalBackend) tkaSyncIfNeeded(nm *netmap.NetworkMap, prefs ipn.PrefsVie
 
 func (b *LocalBackend) tkaFilterNetmapLocked(nm *netmap.NetworkMap) {}
 
-func (b *LocalBackend) tkaFilterDeltaMutsLocked(muts []netmap.NodeMutation) []netmap.NodeMutation {
-	return muts
-}
-
-func (b *LocalBackend) TailnetLockStatus() *ipnstate.TailnetLockStatus {
-	return &ipnstate.TailnetLockStatus{Enabled: false}
-}
-
-// Deprecated: use [LocalBackend.TailnetLockStatus] instead.
-func (b *LocalBackend) NetworkLockStatus() *ipnstate.TailnetLockStatus {
-	return b.TailnetLockStatus()
+func (b *LocalBackend) NetworkLockStatus() *ipnstate.NetworkLockStatus {
+	return &ipnstate.NetworkLockStatus{Enabled: false}
 }

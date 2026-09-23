@@ -24,12 +24,12 @@ import (
 	"tailscale.com/net/sockstats"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/syncs"
-	"tailscale.com/tailcfg"
 	"tailscale.com/types/ipproto"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/logid"
 	"tailscale.com/types/netlogfunc"
 	"tailscale.com/types/netlogtype"
+	"tailscale.com/types/netmap"
 	"tailscale.com/util/eventbus"
 	"tailscale.com/util/set"
 	"tailscale.com/wgengine/router"
@@ -51,19 +51,6 @@ type noopDevice struct{}
 
 func (noopDevice) SetConnectionCounter(netlogfunc.ConnectionCounter) {}
 
-// NodeSource provides node lookups for the network logger.
-// Methods may be called concurrently.
-type NodeSource interface {
-	// SelfNode returns the local node and its owning user profile.
-	// Both views may be invalid if no self node is known yet.
-	SelfNode() (node tailcfg.NodeView, user tailcfg.UserProfileView)
-
-	// NodeByAddr returns the node assigned the given address along with
-	// its owning user profile.
-	// ok is false if no node is known to own addr.
-	NodeByAddr(addr netip.Addr) (node tailcfg.NodeView, user tailcfg.UserProfileView, ok bool)
-}
-
 // Logger logs statistics about every connection.
 // At present, it only logs connections within a tailscale network.
 // By default, exit node traffic is not logged for privacy reasons
@@ -82,8 +69,10 @@ type Logger struct {
 	recordsChan chan record // set to nil when shutdown
 	flushTimer  *time.Timer // fires when record should flush to recordsChan
 
-	// source provides node lookups. Set by Startup, cleared by shutdownLocked.
-	source NodeSource
+	// Information about Tailscale nodes.
+	// These are read-only once updated by ReconfigNetworkMap.
+	selfNode nodeUser
+	allNodes map[netip.Addr]nodeUser // includes selfNode; nodeUser values are always valid
 
 	// Information about routes.
 	// These are read-only once updated by ReconfigRoutes.
@@ -126,20 +115,14 @@ var testClient *http.Client
 // The sock is used to populated the PhysicalTraffic field in [netlogtype.Message].
 //
 // The netMon parameter is optional; if non-nil it's used to do faster interface lookups.
-//
-// source provides on-demand node lookups for connections seen by the logger.
-// It must be non-nil.
-func (nl *Logger) Startup(logf logger.Logf, source NodeSource, nodeLogID, domainLogID logid.PrivateID, tun, sock Device, netMon *netmon.Monitor, health *health.Tracker, bus *eventbus.Bus, logExitFlowEnabledEnabled bool) error {
+func (nl *Logger) Startup(logf logger.Logf, nm *netmap.NetworkMap, nodeLogID, domainLogID logid.PrivateID, tun, sock Device, netMon *netmon.Monitor, health *health.Tracker, bus *eventbus.Bus, logExitFlowEnabledEnabled bool) error {
 	nl.mu.Lock()
 	defer nl.mu.Unlock()
 
 	if nl.shutdownLocked != nil {
 		return fmt.Errorf("network logger already running")
 	}
-	if source == nil {
-		return fmt.Errorf("network logger requires a non-nil NodeSource")
-	}
-	nl.source = source
+	nl.selfNode, nl.allNodes = makeNodeMaps(nm)
 
 	// Startup a log stream to Tailscale's logging service.
 	if logf == nil {
@@ -211,7 +194,8 @@ func (nl *Logger) Startup(logf logger.Logf, source NodeSource, nodeLogID, domain
 
 		// Purge state.
 		nl.shutdownLocked = nil
-		nl.source = nil
+		nl.selfNode = nodeUser{}
+		nl.allNodes = nil
 		nl.routeAddrs = nil
 		nl.routePrefixes = nil
 
@@ -265,15 +249,15 @@ func (nl *Logger) addNewVirtConnLocked(c netlogtype.Connection) connType {
 	var srcNodeLen, dstNodeLen int
 	srcNode, srcSeen := nl.record.seenNodes[c.Src.Addr()]
 	if !srcSeen {
-		if node, user, ok := nl.source.NodeByAddr(c.Src.Addr()); ok {
-			srcNode = nodeUser{node, user}
+		srcNode = nl.allNodes[c.Src.Addr()]
+		if srcNode.Valid() {
 			srcNodeLen = srcNode.jsonLen()
 		}
 	}
 	dstNode, dstSeen := nl.record.seenNodes[c.Dst.Addr()]
 	if !dstSeen {
-		if node, user, ok := nl.source.NodeByAddr(c.Dst.Addr()); ok {
-			dstNode = nodeUser{node, user}
+		dstNode = nl.allNodes[c.Dst.Addr()]
+		if dstNode.Valid() {
 			dstNodeLen = dstNode.jsonLen()
 		}
 	}
@@ -295,10 +279,12 @@ func (nl *Logger) addNewVirtConnLocked(c netlogtype.Connection) connType {
 	nl.recordLen += netlogtype.MaxConnectionCountsJSONSize + srcNodeLen + dstNodeLen
 
 	// Classify the traffic type.
-	// srcNode == self iff NodeByAddr resolved the source to the same node as
-	// the current record's self.
-	srcIsSelfNode := srcNode.Valid() && nl.record.selfNode.Valid() &&
-		srcNode.ID() == nl.record.selfNode.ID()
+	var srcIsSelfNode bool
+	if nl.selfNode.Valid() {
+		srcIsSelfNode = nl.selfNode.Addresses().ContainsFunc(func(p netip.Prefix) bool {
+			return c.Src.Addr() == p.Addr() && p.IsSingleIP()
+		})
+	}
 	switch {
 	case srcIsSelfNode && dstNode.Valid():
 		return virtualTraffic
@@ -349,8 +335,8 @@ func (nl *Logger) addNewPhysConnLocked(c netlogtype.Connection) {
 	var srcNodeLen int
 	srcNode, srcSeen := nl.record.seenNodes[c.Src.Addr()]
 	if !srcSeen {
-		if node, user, ok := nl.source.NodeByAddr(c.Src.Addr()); ok {
-			srcNode = nodeUser{node, user}
+		srcNode = nl.allNodes[c.Src.Addr()]
+		if srcNode.Valid() {
 			srcNodeLen = srcNode.jsonLen()
 		}
 	}
@@ -375,16 +361,14 @@ func (nl *Logger) initRecordLocked() {
 	if nl.recordLen != 0 {
 		return
 	}
-	node, user := nl.source.SelfNode()
-	self := nodeUser{node, user}
 	nl.record = record{
-		selfNode:  self,
+		selfNode:  nl.selfNode,
 		start:     time.Now().UTC(),
 		seenNodes: make(map[netip.Addr]nodeUser),
 		virtConns: make(map[netlogtype.Connection]countsType),
 		physConns: make(map[netlogtype.Connection]netlogtype.Counts),
 	}
-	nl.recordLen = netlogtype.MinMessageJSONSize + self.jsonLen()
+	nl.recordLen = netlogtype.MinMessageJSONSize + nl.selfNode.jsonLen()
 
 	// Start a time to auto-flush the record.
 	// Avoid tickers since continually waking up a goroutine
@@ -420,6 +404,39 @@ func (nl *Logger) flushRecordLocked() {
 	}
 	nl.record = record{}
 	nl.recordLen = 0
+}
+
+func makeNodeMaps(nm *netmap.NetworkMap) (selfNode nodeUser, allNodes map[netip.Addr]nodeUser) {
+	if nm == nil {
+		return
+	}
+	allNodes = make(map[netip.Addr]nodeUser)
+	if nm.SelfNode.Valid() {
+		selfNode = nodeUser{nm.SelfNode, nm.UserProfiles[nm.SelfNode.User()]}
+		for _, addr := range nm.SelfNode.Addresses().All() {
+			if addr.IsSingleIP() {
+				allNodes[addr.Addr()] = selfNode
+			}
+		}
+	}
+	for _, peer := range nm.Peers {
+		if peer.Valid() {
+			for _, addr := range peer.Addresses().All() {
+				if addr.IsSingleIP() {
+					allNodes[addr.Addr()] = nodeUser{peer, nm.UserProfiles[peer.User()]}
+				}
+			}
+		}
+	}
+	return selfNode, allNodes
+}
+
+// ReconfigNetworkMap configures the network logger with an updated netmap.
+func (nl *Logger) ReconfigNetworkMap(nm *netmap.NetworkMap) {
+	selfNode, allNodes := makeNodeMaps(nm) // avoid holding lock while making maps
+	nl.mu.Lock()
+	nl.selfNode, nl.allNodes = selfNode, allNodes
+	nl.mu.Unlock()
 }
 
 func makeRouteMaps(cfg *router.Config) (addrs set.Set[netip.Addr], prefixes []netip.Prefix) {

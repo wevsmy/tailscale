@@ -8,7 +8,6 @@ package ipn
 import (
 	"maps"
 	"net/netip"
-	"time"
 
 	"tailscale.com/drive"
 	"tailscale.com/tailcfg"
@@ -39,7 +38,6 @@ var _LoginProfileCloneNeedsRegeneration = LoginProfile(struct {
 	NodeID         tailcfg.StableNodeID
 	LocalUserID    WindowsUserID
 	ControlURL     string
-	Created        time.Time
 }{})
 
 // Clone makes a deep copy of Prefs.
@@ -103,10 +101,10 @@ var _PrefsCloneNeedsRegeneration = Prefs(struct {
 	AppConnector               AppConnectorPrefs
 	PostureChecking            bool
 	NetfilterKind              string
-	RemoteConfig               bool
 	DriveShares                []*drive.Share
 	RelayServerPort            *uint16
 	RelayServerStaticEndpoints []netip.AddrPort
+	AllowSingleHosts           marshalAsTrueInJSON
 	Persist                    *persist.Persist
 }{})
 

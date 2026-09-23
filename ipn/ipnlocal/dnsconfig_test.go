@@ -72,7 +72,6 @@ func TestDNSConfigForNetmap(t *testing.T) {
 		},
 		{
 			name: "self_name_and_peers",
-			os:   "windows", // the full Hosts map is built only for the Windows hosts-file path
 			nm: &netmap.NetworkMap{
 				SelfNode: (&tailcfg.Node{
 					Name:      "myname.net.",
@@ -109,7 +108,6 @@ func TestDNSConfigForNetmap(t *testing.T) {
 		},
 		{
 			name: "subdomain_resolve_capability",
-			os:   "windows", // the full Hosts map is built only for the Windows hosts-file path
 			nm: &netmap.NetworkMap{
 				SelfNode: (&tailcfg.Node{
 					Name:      "myname.net.",
@@ -138,6 +136,7 @@ func TestDNSConfigForNetmap(t *testing.T) {
 					"peer-with-cap.net.":    ips("100.102.0.1"),
 					"peer-without-cap.net.": ips("100.102.0.2"),
 				},
+				SubdomainHosts: set.Of[dnsname.FQDN]("myname.net.", "peer-with-cap.net."),
 			},
 		},
 		{
@@ -145,7 +144,6 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			// should get IPv6 records for all its peers,
 			// even if they have IPv4.
 			name: "v6_only_self",
-			os:   "windows", // the full Hosts map is built only for the Windows hosts-file path
 			nm: &netmap.NetworkMap{
 				SelfNode: (&tailcfg.Node{
 					Name:      "myname.net.",
@@ -200,8 +198,9 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			want: &dns.Config{
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
 				Hosts: map[dnsname.FQDN][]netip.Addr{
-					"foo.com.": ips("1.2.3.4"),
-					"bar.com.": ips("1::6"),
+					"myname.net.": ips("100.101.101.101"),
+					"foo.com.":    ips("1.2.3.4"),
+					"bar.com.":    ips("1::6"),
 				},
 			},
 		},
@@ -426,21 +425,66 @@ func TestDNSConfigForNetmap(t *testing.T) {
 			},
 			want: &dns.Config{
 				AcceptDNS: true,
-				Hosts:     map[dnsname.FQDN][]netip.Addr{},
+				Hosts: map[dnsname.FQDN][]netip.Addr{
+					"a.":  ips("100.101.101.101"),
+					"p1.": ips("100.102.0.1"),
+				},
 				Routes: map[dnsname.FQDN][]*dnstype.Resolver{
 					dnsname.FQDN("example.com."): {
-						{Addr: "tailscale-app:app1"},
+						{Addr: "http://100.102.0.1:1234/dns-query"},
 					},
 				},
-				MagicDNSHostsUnrouted: true,
+			},
+		},
+		{
+			name: "conn25-split-dns-no-matching-peers",
+			nm: &netmap.NetworkMap{
+				SelfNode: (&tailcfg.Node{
+					Name:      "a",
+					Addresses: ipps("100.101.101.101"),
+					CapMap: tailcfg.NodeCapMap{
+						tailcfg.NodeCapability(appc.AppConnectorsExperimentalAttrName): []tailcfg.RawMessage{
+							tailcfg.RawMessage(`{"name":"app1","connectors":["tag:woo"],"domains":["example.com"]}`),
+						},
+					},
+				}).View(),
+				AllCaps: set.Of(tailcfg.NodeCapability(appc.AppConnectorsExperimentalAttrName)),
+			},
+			peers: nodeViews([]*tailcfg.Node{
+				{
+					ID:        1,
+					Name:      "p1",
+					Addresses: ipps("100.102.0.1"),
+					Tags:      []string{"tag:nomatch"},
+					Hostinfo: (&tailcfg.Hostinfo{
+						Services: []tailcfg.Service{
+							{
+								Proto: tailcfg.PeerAPI4,
+								Port:  1234,
+							},
+						},
+						AppConnector: opt.NewBool(true),
+					}).View(),
+				},
+			}),
+			prefs: &ipn.Prefs{
+				CorpDNS: true,
+			},
+			want: &dns.Config{
+				AcceptDNS: true,
+				Routes:    map[dnsname.FQDN][]*dnstype.Resolver{},
+				Hosts: map[dnsname.FQDN][]netip.Addr{
+					"a.":  ips("100.101.101.101"),
+					"p1.": ips("100.102.0.1"),
+				},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			goos := cmp.Or(tt.os, "linux")
+			verOS := cmp.Or(tt.os, "linux")
 			var log tstest.MemLogger
-			got := dnsConfigForNetmap(tt.nm, peersMap(tt.peers), tt.prefs.View(), tt.expired, log.Logf, goos)
+			got := dnsConfigForNetmap(tt.nm, peersMap(tt.peers), tt.prefs.View(), tt.expired, log.Logf, verOS)
 			if !reflect.DeepEqual(got, tt.want) {
 				gotj, _ := json.MarshalIndent(got, "", "\t")
 				wantj, _ := json.MarshalIndent(tt.want, "", "\t")

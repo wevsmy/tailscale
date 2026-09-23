@@ -60,7 +60,7 @@ func TestTruncateLabelValue(t *testing.T) {
 func TestTruncateLabelValueDeterministic(t *testing.T) {
 	input := strings.Repeat("a", 100)
 	first := TruncateLabelValue(input)
-	for range 10 {
+	for i := 0; i < 10; i++ {
 		got := TruncateLabelValue(input)
 		if got != first {
 			t.Fatalf("non-deterministic: got %q, want %q", got, first)

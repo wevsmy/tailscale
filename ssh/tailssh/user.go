@@ -1,7 +1,7 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd || plan9
+//go:build (linux && !android) || android || (darwin && !ios) || freebsd || openbsd || plan9
 
 package tailssh
 
@@ -93,7 +93,7 @@ func defaultPathForUser(u *user.User) string {
 	}
 	isRoot := u.Uid == "0"
 	switch distro.Get() {
-	case distro.Debian, distro.Crostini:
+	case distro.Debian:
 		hi := hostinfo.New()
 		if hi.Distro == "ubuntu" {
 			// distro.Get's Debian includes Ubuntu. But see if it's actually Ubuntu.

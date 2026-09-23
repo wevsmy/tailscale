@@ -6,10 +6,7 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -22,13 +19,7 @@ import (
 	"time"
 
 	esbuild "github.com/evanw/esbuild/pkg/api"
-	"tailscale.com/cmd/tsconnect/wasmbuild"
 )
-
-// lastRawWasmSHA256 is set by buildWasm in non-dev mode after the
-// `go build` step but before wasm-opt runs. build-pkg reads it to
-// emit pkg/build-info.json (see [wasmbuild.BuildInfo]).
-var lastRawWasmSHA256 string
 
 const (
 	devMode  = true
@@ -237,14 +228,14 @@ func buildWasm(dev bool) ([]byte, error) {
 	// to fail for unclosed files.
 	defer outputFile.Close()
 
-	args := []string{"build", "-tags", wasmbuild.Tags()}
+	args := []string{"build", "-tags", "tailscale_go,osusergo,netgo,nethttpomithttp2,omitidna,omitpemdecrypt"}
 	if !dev {
 		if *devControl != "" {
 			return nil, fmt.Errorf("Development control URL can only be used in dev mode.")
 		}
 		// Omit long paths and debug symbols in release builds, to reduce the
 		// generated WASM binary size.
-		args = append(args, "-trimpath", "-ldflags", wasmbuild.ProdLDFlags)
+		args = append(args, "-trimpath", "-ldflags", "-s -w")
 	} else if *devControl != "" {
 		args = append(args, "-ldflags", fmt.Sprintf("-X 'main.ControlURL=%v'", *devControl))
 	}
@@ -262,34 +253,13 @@ func buildWasm(dev bool) ([]byte, error) {
 	log.Printf("Built wasm in %v\n", time.Since(start).Round(time.Millisecond))
 
 	if !dev {
-		// Capture the raw (pre-wasm-opt) sha256 so build-pkg can write it to
-		// pkg/build-info.json. Tests reproduce this sha256 to detect a stale
-		// pkg/main.wasm without having to re-run wasm-opt.
-		sum, err := sha256File(outputPath)
+		err := runWasmOpt(outputPath)
 		if err != nil {
-			return nil, fmt.Errorf("hashing raw wasm: %w", err)
-		}
-		lastRawWasmSHA256 = sum
-
-		if err := runWasmOpt(outputPath); err != nil {
 			return nil, fmt.Errorf("Cannot run wasm-opt: %w", err)
 		}
 	}
 
 	return os.ReadFile(outputPath)
-}
-
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func runWasmOpt(path string) error {

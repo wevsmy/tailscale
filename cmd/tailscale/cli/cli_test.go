@@ -30,7 +30,6 @@ import (
 	"tailscale.com/tka"
 	"tailscale.com/tstest"
 	"tailscale.com/tstest/deptest"
-	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/opt"
 	"tailscale.com/types/persist"
@@ -770,22 +769,7 @@ func TestPrefsFromUpArgs(t *testing.T) {
 			args: upArgsT{
 				exitNodeIP: "foo",
 			},
-			st: &ipnstate.Status{
-				Peer: map[key.NodePublic]*ipnstate.PeerStatus{
-					key.NewNode().Public(): {
-						DNSName:      "example.com.",
-						TailscaleIPs: []netip.Addr{netip.MustParseAddr("1.0.0.2")},
-					},
-				},
-			},
-			wantErr: `invalid value "foo" for --exit-node; must be IP or peer hostname`,
-		},
-		{
-			name: "error_exit_node_not_started",
-			args: upArgsT{
-				exitNodeIP: "foo",
-			},
-			wantErr: `cannot resolve exit node by hostname while Tailscale is starting up; please use its Tailscale IP address instead`,
+			wantErr: `invalid value "foo" for --exit-node; must be IP or hostname`,
 		},
 		{
 			name: "error_exit_node_allow_lan_without_exit_node",
@@ -1016,6 +1000,9 @@ func TestPrefFlagMapping(t *testing.T) {
 			continue
 		}
 		switch prefName {
+		case "AllowSingleHosts":
+			// Fake pref for downgrade compat. See #12058.
+			continue
 		case "WantRunning", "Persist", "LoggedOut":
 			// All explicitly handled (ignored) by checkForAccidentalSettingReverts.
 			continue
@@ -1611,7 +1598,7 @@ func TestParseNLArgs(t *testing.T) {
 
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			keys, disablements, err := parseTLArgs(tc.input, tc.parseKeys, tc.parseDisablements)
+			keys, disablements, err := parseNLArgs(tc.input, tc.parseKeys, tc.parseDisablements)
 			if (tc.wantErr == nil && err != nil) ||
 				(tc.wantErr != nil && err == nil) ||
 				(tc.wantErr != nil && err != nil && tc.wantErr.Error() != err.Error()) {

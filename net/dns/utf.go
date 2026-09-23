@@ -28,7 +28,10 @@ func maybeUnUTF16(bs []byte) []byte {
 		// Can't be complete UTF-16.
 		return bs
 	}
-	checkLen := min(len(bs), 20)
+	checkLen := 20
+	if len(bs) < checkLen {
+		checkLen = len(bs)
+	}
 	zeroOff := bytes.IndexByte(bs[:checkLen], 0)
 	if zeroOff == -1 {
 		return bs

@@ -13,9 +13,6 @@ import (
 )
 
 // GetEffectivePolicy returns the effective policy for the specified scope.
-//
-// API maturity: this method is not considered a stable API and is
-// subject to change between releases.
 func (lc *Client) GetEffectivePolicy(ctx context.Context, scope setting.PolicyScope) (*setting.Snapshot, error) {
 	scopeID, err := scope.MarshalText()
 	if err != nil {

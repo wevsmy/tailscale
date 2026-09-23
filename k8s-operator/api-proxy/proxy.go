@@ -31,7 +31,6 @@ import (
 	"tailscale.com/client/tailscale/apitype"
 	ksr "tailscale.com/k8s-operator/sessionrecording"
 	"tailscale.com/kube/kubetypes"
-	"tailscale.com/net/netutil"
 	"tailscale.com/net/netx"
 	"tailscale.com/sessionrecording"
 	"tailscale.com/tailcfg"
@@ -65,7 +64,7 @@ func NewAPIServerProxy(zlog *zap.SugaredLogger, restConfig *rest.Config, ts *tsn
 		return nil, fmt.Errorf("could not get rest.TransportConfig(): %w", err)
 	}
 
-	tr := netutil.NewDefaultTransport()
+	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig, err = transport.TLSConfigFor(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("could not get transport.TLSConfigFor(): %w", err)

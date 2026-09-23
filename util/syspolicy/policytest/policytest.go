@@ -226,7 +226,7 @@ func (c Config) HasAnyOf(keys ...pkey.Key) (bool, error) {
 	return false, nil
 }
 
-func (c Config) RegisterChangeCallback(uid string, callback func(policyclient.PolicyChange)) (func(), error) {
+func (c Config) RegisterChangeCallback(callback func(policyclient.PolicyChange)) (func(), error) {
 	w, ok := c[watchersKey].(*watchers)
 	if !ok {
 		return func() {}, nil
@@ -242,7 +242,3 @@ func (c Config) RegisterChangeCallback(uid string, callback func(policyclient.Po
 }
 
 func (sp Config) SetDebugLoggingEnabled(enabled bool) {}
-
-func (c Config) GetPolicySnapshot(uid string) (*policyclient.PolicySnapshot, error) {
-	return nil, nil
-}

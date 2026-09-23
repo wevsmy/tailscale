@@ -19,7 +19,6 @@ type Distro string
 
 const (
 	Debian    = Distro("debian")
-	Crostini  = Distro("crostini") // ChromeOS Crostini Linux container; Debian-based
 	Arch      = Distro("arch")
 	Synology  = Distro("synology")
 	OpenWrt   = Distro("openwrt")
@@ -85,11 +84,6 @@ func linuxDistro() Distro {
 		// Currently supported product families:
 		// - UDM (UniFi Dream Machine, UDM-Pro)
 		return UBNT
-	case have("/opt/google/cros-containers/bin/garcon"):
-		// ChromeOS Crostini ships /opt/google/cros-containers/bin/garcon
-		// in every penguin container. MUST be checked before Debian since
-		// Crostini is Debian-based.
-		return Crostini
 	case have("/etc/debian_version"):
 		return Debian
 	case have("/etc/arch-release"):

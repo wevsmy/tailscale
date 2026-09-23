@@ -199,8 +199,7 @@ func (s *Server) controlSupportsCheckMode(ctx context.Context) bool {
 	if err != nil {
 		return true
 	}
-	return strings.HasSuffix(controlURL.Host, ".tailscale.com") ||
-		controlURL.Host == "control.tailscale" // for natlab tests
+	return strings.HasSuffix(controlURL.Host, ".tailscale.com")
 }
 
 // awaitUserAuth blocks until the given session auth has been completed

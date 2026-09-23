@@ -9,9 +9,8 @@ import (
 	"runtime/pprof"
 	"slices"
 	"strings"
+	"testing"
 	"time"
-
-	"tailscale.com/util/testenv"
 )
 
 // ResourceCheck takes a snapshot of the current goroutines and registers a
@@ -20,7 +19,7 @@ import (
 // can look at specific routines).
 //
 // It panics if called from a parallel test.
-func ResourceCheck(tb testenv.TB) {
+func ResourceCheck(tb testing.TB) {
 	tb.Helper()
 
 	// Set an environment variable (anything at all) just for the
@@ -49,7 +48,7 @@ func ResourceCheck(tb testenv.TB) {
 		// Parse and print goroutines.
 		start := parseGoroutines(startStacks)
 		end := parseGoroutines(endStacks)
-		if testenv.Verbose() {
+		if testing.Verbose() {
 			tb.Logf("goroutines start:\n%s", printGoroutines(start))
 			tb.Logf("goroutines end:\n%s", printGoroutines(end))
 		}
