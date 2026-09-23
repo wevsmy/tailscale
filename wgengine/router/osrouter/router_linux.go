@@ -6,13 +6,18 @@
 package osrouter
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"iter"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,12 +33,14 @@ import (
 	"tailscale.com/envknob"
 	"tailscale.com/health"
 	"tailscale.com/net/netmon"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tsconst"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/opt"
 	"tailscale.com/types/preftype"
 	"tailscale.com/util/eventbus"
 	"tailscale.com/util/linuxfw"
+	"tailscale.com/util/set"
 	"tailscale.com/version/distro"
 	"tailscale.com/wgengine/router"
 )
@@ -72,8 +79,20 @@ type linuxRouter struct {
 
 	// Various feature checks for the network stack.
 	ipRuleAvailable bool     // whether kernel was built with IP_MULTIPLE_TABLES
-	v6Available     bool     // whether the kernel supports IPv6
 	fwmaskWorksLazy opt.Bool // whether we can use 'ip rule...fwmark <mark>/<mask>'; set lazily
+
+	// interfaceV6Usable reports whether the kernel has IPv6 enabled on the
+	// tunnel interface specifically (distinct from global IPv6 support,
+	// which the netfilter runner tracks). Always set: the constructor wires
+	// it to interfaceV6UsableForTun; tests override it. See #20447.
+	interfaceV6Usable func() bool
+
+	// interfaceV6UsableMemo memoizes interfaceV6Usable for the duration of a
+	// single Set, so its many getV6Available calls don't each hit /proc. It's
+	// an atomic tri-state (see the memoV6 constants) because getV6Available is
+	// also reached, without holding mu, from the onIPRuleDeleted timer's
+	// justAddIPRules; the unset value there means "read live". See #20447.
+	interfaceV6UsableMemo atomic.Int32
 
 	// ipPolicyPrefBase is the base priority at which ip rules are installed.
 	ipPolicyPrefBase int
@@ -83,6 +102,7 @@ type linuxRouter struct {
 
 	mu                sync.Mutex
 	addrs             map[netip.Prefix]bool
+	lastScanAddrs     set.Set[netip.Prefix] // desired addrs at the last successful orphan scan; nil until the first scan
 	routes            map[netip.Prefix]bool
 	localRoutes       map[netip.Prefix]bool
 	snatSubnetRoutes  bool
@@ -121,6 +141,7 @@ func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon
 		ipRuleFixLimiter: rate.NewLimiter(rate.Every(5*time.Second), 10),
 		ipPolicyPrefBase: 5200,
 	}
+	r.interfaceV6Usable = func() bool { return interfaceV6UsableForTun(r.tunname) }
 	ec := bus.Client("router-linux")
 	r.rulesAddedPub = eventbus.Publish[AddIPRules](ec)
 	eventbus.SubscribeFunc(ec, func(rs netmon.RuleDeleted) {
@@ -168,8 +189,6 @@ func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon
 		r.ipPolicyPrefBase = 1300
 		r.logf("mwan3 on openWRT detected, switching policy base priority to 1300")
 	}
-
-	r.v6Available = linuxfw.CheckIPv6(r.logf) == nil
 
 	r.fixupWSLMTU()
 
@@ -362,6 +381,12 @@ func (r *linuxRouter) Up() error {
 		return fmt.Errorf("bringing interface up: %w", err)
 	}
 
+	// Android: слідкувати за зміною мережі (Wi-Fi ↔ LTE), щоб правило
+	// exit-node вказувало на актуальну таблицю uplink'у.
+	if runtime.GOOS == "android" && r.netMon != nil && r.unregNetMon == nil {
+		r.unregNetMon = r.netMon.RegisterChangeCallback(r.onAndroidNetworkChange)
+	}
+
 	return nil
 }
 
@@ -418,6 +443,11 @@ func (r *linuxRouter) setupNetfilterLocked(kind string) error {
 func (r *linuxRouter) Set(cfg *router.Config) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Memoize the tun's IPv6 usability for the duration of this Set so the
+	// per-address/route getV6Available calls don't each re-read /proc.
+	// snapshotV6Usable runs now; the closure it returns (trailing ()) is
+	// deferred to clear the memo on return.
+	defer r.snapshotV6Usable()()
 	var errs []error
 	if cfg == nil {
 		cfg = &shutdownConfig
@@ -451,11 +481,47 @@ func (r *linuxRouter) Set(cfg *router.Config) error {
 	}
 	r.routes = newRoutes
 
+	prevAddrs := r.addrs
 	newAddrs, err := cidrDiff("addr", r.addrs, cfg.LocalAddrs, r.addAddress, r.delAddress, r.logf)
 	if err != nil {
 		errs = append(errs, err)
 	}
 	r.addrs = newAddrs
+
+	// r.addrs only tracks what this instance configured, so it misses
+	// Tailscale addresses a previous instance left on a persistent tailscale0.
+	// After the reconcile above (so our own addresses and their loopback rules
+	// are installed first), sweep any Tailscale-range interface address that
+	// isn't desired and that we don't already track (prevAddrs). Like cidrDiff,
+	// this trusts cfg.LocalAddrs to be authoritative. See #19974.
+	//
+	// TODO(bcreane): a late orphan with no config change -- IPv6 becoming
+	// available, or an external re-add -- isn't caught here; re-run this sweep on
+	// netmon.ChangeDelta to handle it. See tailscale/corp#43882.
+	wantAddrs := set.SetOf(cfg.LocalAddrs)
+	if r.lastScanAddrs == nil || !r.lastScanAddrs.Equal(wantAddrs) {
+		if ifaceAddrs, err := r.tailscaleInterfaceAddrs(); err != nil {
+			r.logf("router: enumerating interface addresses failed, skipping orphan cleanup: %v", err)
+		} else {
+			r.lastScanAddrs = wantAddrs
+			kernelAddrs := r.deletableAddrs(ifaceAddrs)
+			var removed []netip.Prefix
+			for p := range orphanedAddrs(kernelAddrs, cfg.LocalAddrs) {
+				if prevAddrs[p] {
+					continue // an address we were tracking; cidrDiff already handled it
+				}
+				if err := r.delAddress(p); err != nil {
+					r.logf("router: removing stale address %v from %s failed: %v", p, r.tunname, err)
+					errs = append(errs, err)
+					continue
+				}
+				removed = append(removed, p)
+			}
+			if len(removed) > 0 {
+				r.logf("router: removed %d stale Tailscale address(es) from %s left by a previous instance: %v", len(removed), r.tunname, removed)
+			}
+		}
+	}
 
 	// Ensure that the SNAT rule is added or removed as needed.
 	switch {
@@ -528,10 +594,8 @@ func (r *linuxRouter) Set(cfg *router.Config) error {
 	}
 
 	// Issue 11405: enable IP forwarding on gokrazy.
-
-	// Also enable IP forwarding on Android.
 	advertisingRoutes := len(cfg.SubnetRoutes) > 0
-	if (getDistroFunc() == distro.Gokrazy || runtime.GOOS == "android") && advertisingRoutes {
+	if getDistroFunc() == distro.Gokrazy && advertisingRoutes {
 		r.enableIPForwarding()
 	}
 
@@ -847,12 +911,88 @@ func (r *linuxRouter) setNetfilterModeLocked(mode preftype.NetfilterMode) error 
 // getV6FilteringAvailable returns true if the router is able to setup the
 // required tailscale filter rules for IPv6.
 func (r *linuxRouter) getV6FilteringAvailable() bool {
+	if r.nfr == nil {
+		return false
+	}
 	return r.nfr.HasIPV6() && r.nfr.HasIPV6Filter()
 }
 
-// getV6Available returns true if the host supports IPv6.
+// getV6Available reports whether the router can manage IPv6. r.nfr can be nil if
+// setupNetfilterLocked failed earlier in Set (which continues on error), so
+// treat a nil runner as no IPv6 rather than dereferencing it.
+//
+// It requires both global IPv6 support (the netfilter runner) and IPv6 on the
+// tun interface itself, which can differ: the kernel may refuse IPv6 on the tun
+// while global IPv6 is fine. The per-interface check consults /proc, so within
+// a single Set (which calls this once per address and route) the result is
+// snapshotted by snapshotV6Usable rather than re-read each time. See #20447.
 func (r *linuxRouter) getV6Available() bool {
-	return r.nfr.HasIPV6()
+	if r.nfr == nil {
+		return false
+	}
+	switch memoV6(r.interfaceV6UsableMemo.Load()) {
+	case memoV6Usable:
+		return r.nfr.HasIPV6()
+	case memoV6Unusable:
+		return false
+	default: // memoV6Unset: no snapshot active, read live.
+		return r.nfr.HasIPV6() && r.interfaceV6Usable()
+	}
+}
+
+// memoV6 is the state of a linuxRouter.interfaceV6UsableMemo snapshot.
+type memoV6 int32
+
+const (
+	memoV6Unset    memoV6 = iota // no snapshot active; read live
+	memoV6Usable                 // snapshot: IPv6 usable on the tun interface
+	memoV6Unusable               // snapshot: IPv6 not usable on the tun interface
+)
+
+// snapshotV6Usable memoizes interfaceV6Usable for the duration of a Set, so
+// its many getV6Available calls don't each hit /proc. It returns a function
+// that clears the snapshot, intended to be deferred. The snapshot is taken
+// once: an IPv6-enabled flip concurrent with a single Set is rare and, since a
+// stray v6 operation is no longer fatal, harmless until the next Set. See
+// #20447.
+func (r *linuxRouter) snapshotV6Usable() func() {
+	m := memoV6Unusable
+	if r.interfaceV6Usable() {
+		m = memoV6Usable
+	}
+	r.interfaceV6UsableMemo.Store(int32(m))
+	return func() { r.interfaceV6UsableMemo.Store(int32(memoV6Unset)) }
+}
+
+// interfaceV6UsableForTun reports whether the kernel has IPv6 enabled on the
+// named interface. The kernel creates /proc/sys/net/ipv6/conf/<iface>/ only
+// once IPv6 is up on the interface (e.g. an MTU below the 1280-byte IPv6
+// minimum removes it entirely), and disable_ipv6 within it reflects whether
+// IPv6 has since been turned off explicitly.
+func interfaceV6UsableForTun(tunname string) bool {
+	if tunname == "" {
+		return false
+	}
+	// Open under conf/ with os.OpenInRoot so a "../" or symlink in tunname can't
+	// escape the directory.
+	f, err := os.OpenInRoot("/proc/sys/net/ipv6/conf", filepath.Join(tunname, "disable_ipv6"))
+	if err != nil {
+		// A missing directory/knob means IPv6 isn't up on the interface, so it's
+		// unavailable. Any other error (e.g. EACCES, or tunname escaping the
+		// root) means we couldn't read the knob; assume IPv6 is usable rather
+		// than skipping it on a transient or defensive error.
+		return !os.IsNotExist(err)
+	}
+	defer f.Close()
+	bs, err := io.ReadAll(f)
+	if err != nil {
+		return true // couldn't read; assume usable
+	}
+	disabled, err := strconv.ParseBool(strings.TrimSpace(string(bs)))
+	if err != nil {
+		return true // unparseable; assume usable
+	}
+	return !disabled
 }
 
 // addAddress adds an IP/mask to the tunnel interface. Fails if the
@@ -881,30 +1021,142 @@ func (r *linuxRouter) addAddress(addr netip.Prefix) error {
 	return nil
 }
 
-// delAddress removes an IP/mask from the tunnel interface. Fails if
-// the address is not assigned to the interface, or if the removal
-// fails.
+// delAddress removes an IP/mask from the tunnel interface. It attempts both the
+// loopback-rule teardown and the address deletion even if the former fails, so a
+// missing firewall rule can't leak the address; errors from both are joined.
 func (r *linuxRouter) delAddress(addr netip.Prefix) error {
-	if !r.getV6Available() && addr.Addr().Is6() {
-		return nil
-	}
+	var errs []error
 	if err := r.delLoopbackRule(addr.Addr()); err != nil {
-		return err
+		errs = append(errs, err)
 	}
+	if err := r.delAddrRaw(addr); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// delAddrRaw deletes addr from the tunnel interface without the loopback-rule
+// teardown that [linuxRouter.delAddress] does.
+func (r *linuxRouter) delAddrRaw(addr netip.Prefix) error {
 	if r.useIPCommand() {
 		if err := r.cmd.run("ip", "addr", "del", addr.String(), "dev", r.tunname); err != nil {
 			return fmt.Errorf("deleting address %q from tunnel interface: %w", addr, err)
 		}
-	} else {
-		link, err := r.link()
-		if err != nil {
-			return fmt.Errorf("deleting address %v, %w", addr, err)
-		}
-		if err := netlink.AddrDel(link, nlAddrOfPrefix(addr)); err != nil {
-			return fmt.Errorf("deleting address %v from tunnel interface: %w", addr, err)
-		}
+		return nil
+	}
+	link, err := r.link()
+	if err != nil {
+		return fmt.Errorf("deleting address %v, %w", addr, err)
+	}
+	if err := netlink.AddrDel(link, nlAddrOfPrefix(addr)); err != nil {
+		return fmt.Errorf("deleting address %v from tunnel interface: %w", addr, err)
 	}
 	return nil
+}
+
+// isDeletableAddr reports whether ip, found on the tunnel interface, is a
+// Tailscale-range address the live router should delete. It excludes IPv6 when
+// IPv6 is unavailable so the Set-time sweep doesn't churn on addresses this
+// instance couldn't have installed; the teardown path uses [tailscaleAddrs]
+// instead and removes every Tailscale-range address.
+func (r *linuxRouter) isDeletableAddr(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if !tsaddr.IsTailscaleIP(ip) {
+		return false
+	}
+	return !ip.Is6() || r.getV6Available()
+}
+
+// tailscaleAddrs yields only the Tailscale-range addresses from addrs, per
+// [tsaddr.IsTailscaleIP].
+func tailscaleAddrs(addrs iter.Seq[netip.Prefix]) iter.Seq[netip.Prefix] {
+	return func(yield func(netip.Prefix) bool) {
+		for p := range addrs {
+			if tsaddr.IsTailscaleIP(p.Addr()) && !yield(p) {
+				return
+			}
+		}
+	}
+}
+
+// deletableAddrs yields the addresses from addrs the live router should delete,
+// per [linuxRouter.isDeletableAddr].
+func (r *linuxRouter) deletableAddrs(addrs iter.Seq[netip.Prefix]) iter.Seq[netip.Prefix] {
+	return func(yield func(netip.Prefix) bool) {
+		for p := range addrs {
+			if r.isDeletableAddr(p.Addr()) && !yield(p) {
+				return
+			}
+		}
+	}
+}
+
+// tailscaleInterfaceAddrs yields the addresses on the tunnel interface,
+// preserving each kernel prefix length so a later delete matches. It errors if
+// the interface can't be read.
+func (r *linuxRouter) tailscaleInterfaceAddrs() (iter.Seq[netip.Prefix], error) {
+	if r.useIPCommand() {
+		return r.tailscaleInterfaceAddrsIPCommand()
+	}
+	link, err := r.link()
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return nil, err
+	}
+	var ret []netip.Prefix
+	for _, a := range addrs {
+		if a.IPNet == nil {
+			continue
+		}
+		if pfx, ok := netipx.FromStdIPNet(a.IPNet); ok {
+			ret = append(ret, pfx)
+		}
+	}
+	return slices.Values(ret), nil
+}
+
+// tailscaleInterfaceAddrsIPCommand is the "ip" command implementation of
+// [linuxRouter.tailscaleInterfaceAddrs], used in tests and when
+// TS_DEBUG_USE_IP_COMMAND is set.
+func (r *linuxRouter) tailscaleInterfaceAddrsIPCommand() (iter.Seq[netip.Prefix], error) {
+	out, err := r.cmd.output("ip", "-oneline", "addr", "show", "dev", r.tunname)
+	if err != nil {
+		return nil, err
+	}
+	var ret []netip.Prefix
+	for line := range bytes.Lines(out) {
+		// `ip -oneline addr show` puts each address on one line as
+		// "inet <cidr>" or "inet6 <cidr>".
+		fields := strings.Fields(string(line))
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] != "inet" && fields[i] != "inet6" {
+				continue
+			}
+			p, err := netip.ParsePrefix(fields[i+1])
+			if err != nil {
+				break
+			}
+			ret = append(ret, p)
+			break
+		}
+	}
+	return slices.Values(ret), nil
+}
+
+// orphanedAddrs yields the addresses in kernelAddrs that are not in desired,
+// i.e. the stale addresses left on the interface that the sweep should remove.
+func orphanedAddrs(kernelAddrs iter.Seq[netip.Prefix], desired []netip.Prefix) iter.Seq[netip.Prefix] {
+	want := set.SetOf(desired)
+	return func(yield func(netip.Prefix) bool) {
+		for p := range kernelAddrs {
+			if !want.Contains(p) && !yield(p) {
+				return
+			}
+		}
+	}
 }
 
 // addLoopbackRule adds a firewall rule to permit loopback traffic to
@@ -1268,6 +1520,17 @@ func (r *linuxRouter) addIPRules() error {
 		return err
 	}
 
+	// Android: delIPRules вище прибрав правило 13001 для СТАРОЇ таблиці
+	// uplink'у (ipRules() читає androidUplinkTable), тепер перечитуємо
+	// таблицю, щоб justAddIPRules поставив правило вже на нову.
+	if runtime.GOOS == "android" {
+		r.refreshAndroidUplinkTable()
+		if err := r.justAddIPRules(); err != nil {
+			return err
+		}
+		return r.androidUIDRules(true)
+	}
+
 	return r.justAddIPRules()
 }
 
@@ -1401,80 +1664,14 @@ var ubntIPRules = []netlink.Rule{
 	},
 }
 
-// detectAndroidDefaultTable returns the routing table number for the current
-// default route on Android. Returns 0 if detection fails.
-func detectAndroidDefaultTable() int {
-	routes, err := netlink.RouteGet(net.IPv4(8, 8, 8, 8))
-	if err != nil || len(routes) == 0 {
-		return 0
-	}
-	if routes[0].Table > 0 {
-		return routes[0].Table
-	}
-	return 0
-}
-
-// getAndroidIPRules returns Android-specific IP rules, including a dynamic
-// exit node rule that uses the current default network's routing table.
-func getAndroidIPRules() []netlink.Rule {
-	rules := []netlink.Rule{
-		// Priority 7300 (12500): Tailscale CGNAT range (100.64.0.0/10) always uses table 52, before VPN rules
-		// This ensures peer-to-peer traffic doesn't go through other VPNs
-		{
-			Priority: 7300, // 5200 + 7300 = 12500
-			Dst:      netipx.PrefixIPNet(netip.MustParsePrefix("100.64.0.0/10")),
-			Table:    tailscaleRouteTable.Num,
-		},
-		{
-			Priority: 7300, // 5200 + 7300 = 12500
-			Dst:      netipx.PrefixIPNet(netip.MustParsePrefix("fd7a:115c:a1e0::/48")),
-			Table:    tailscaleRouteTable.Num,
-		},
-
-		// Priority 13001: lookup main table for reply traffic marked with SubnetRouteMark.
-		// Un-NATed replies to hotspot clients need the downstream subnet route
-		// (e.g. 10.45.158.0/24 dev wlan2) which the kernel adds to the main table.
-		{
-			Priority: 7801,                            // 5200 + 7801 = 13001
-			Mark:     tsconst.LinuxSubnetRouteMarkNum, // 0x8000000
-			Mask:     tsconst.LinuxFwmarkMaskNum,      // 0x1e000000
-			Table:    mainRouteTable.Num,              // 254
-		},
-
-		// Priority 13001: after Android VPN rules at 13000, before default network (14999+)
-		// When VPN active: VPN rules at 13000 catch traffic first (VPN wins)
-		// When VPN off: Tailscale catches traffic as fallback
-		{
-			Priority: 7801, // 5200 + 7801 = 13001
-			Invert:   true,
-			Mark:     tsconst.LinuxBypassMarkNum,
-			Mask:     tsconst.LinuxFwmarkMaskNum,
-			Table:    tailscaleRouteTable.Num,
-		},
-	}
-
-	// Add exit node rule: route traffic FROM Tailscale network to internet
-	// using the current default network's routing table
-	if table := detectAndroidDefaultTable(); table > 0 {
-		// Traffic from tailscale0 is marked with LinuxSubnetRouteMark in ts-forward
-		rules = append(rules, netlink.Rule{
-			Priority: 7801,                            // 5200 + 7801 = 13001
-			Mark:     tsconst.LinuxSubnetRouteMarkNum, // 0x8000000
-			Mask:     tsconst.LinuxFwmarkMaskNum,
-			Table:    table,
-		})
-	}
-
-	return rules
-}
-
 // ipRules returns the appropriate list of ip rules to be used by Tailscale. See
 // comments on baseIPRules and ubntIPRules for more details.
 func ipRules() []netlink.Rule {
+	if runtime.GOOS == "android" {
+		return androidIPRules()
+	}
 	if getDistroFunc() == distro.UBNT {
 		return ubntIPRules
-	} else if runtime.GOOS == "android" {
-		return getAndroidIPRules()
 	}
 	return baseIPRules
 }
@@ -1524,6 +1721,9 @@ func (r *linuxRouter) addIPRulesWithIPCommand() error {
 				"rule", "add",
 				"pref", strconv.Itoa(rule.Priority + r.ipPolicyPrefBase),
 			}
+			if rule.Invert {
+				args = append(args, "not")
+			}
 			if rule.Mark != 0 {
 				if r.fwmaskWorks() {
 					args = append(args, "fwmark", fmt.Sprintf("0x%x/%s", rule.Mark, tsconst.LinuxFwmarkMask))
@@ -1531,8 +1731,17 @@ func (r *linuxRouter) addIPRulesWithIPCommand() error {
 					args = append(args, "fwmark", fmt.Sprintf("0x%x", rule.Mark))
 				}
 			}
+			if rule.IifName != "" {
+				args = append(args, "iif", rule.IifName)
+			}
 			if rule.Table != 0 {
-				args = append(args, "table", mustRouteTable(rule.Table).ipCmdArg())
+				if rt, ok := routeTableByNumber[rule.Table]; ok {
+					args = append(args, "table", rt.ipCmdArg())
+				} else {
+					// Таблиці netd на Android (1023 для wlan0 тощо) не мають імен у
+					// нашому реєстрі — передаємо номер.
+					args = append(args, "table", strconv.Itoa(rule.Table))
+				}
 			}
 			if rule.Type == unix.RTN_UNREACHABLE {
 				args = append(args, "type", "unreachable")
@@ -1565,6 +1774,9 @@ func (r *linuxRouter) delIPRules() error {
 		return r.delIPRulesWithIPCommand()
 	}
 	var errAcc error
+	if runtime.GOOS == "android" {
+		errAcc = r.androidUIDRules(false)
+	}
 	for _, family := range r.addrFamilies() {
 		for _, ru := range ipRules() {
 			// Note: r is a value type here; safe to mutate it.
@@ -1762,9 +1974,48 @@ func platformCanNetfilter() bool {
 // The function calls cleanUp for both iptables and nftables since which ever
 // netfilter runner is used, the cleanUp function for the other one doesn't do anything.
 func cleanUp(logf logger.Logf, interfaceName string) {
-	if interfaceName != "userspace-networking" && platformCanNetfilter() {
+	if interfaceName == "userspace-networking" {
+		return
+	}
+	if platformCanNetfilter() {
 		linuxfw.IPTablesCleanUp(logf)
 		linuxfw.NfTablesCleanUp(logf)
+	}
+	removeOrphanedAddrsForCleanup(logf, osCommandRunner{ambientCapNetAdmin: useAmbientCaps()}, interfaceName)
+}
+
+// removeOrphanedAddrsForCleanup removes every Tailscale-range address from
+// interfaceName. On the teardown path (tailscaled --cleanup, and the cleanup at
+// daemon start) there is no desired config or running router, so every such
+// address is an orphan. Best-effort: failures are logged, not returned.
+func removeOrphanedAddrsForCleanup(logf logger.Logf, cmd commandRunner, interfaceName string) {
+	// A minimal router suffices: delAddress reaches delLoopbackRule, which
+	// returns early because netfilterMode is netfilterOff (the zero value), so
+	// the nil nfr/netMon/health are never dereferenced. logf is wrapped to match
+	// the live router's "router: " prefix.
+	r := &linuxRouter{
+		logf:    logger.WithPrefix(logf, "router: "),
+		tunname: interfaceName,
+		cmd:     cmd,
+	}
+	ifaceAddrs, err := r.tailscaleInterfaceAddrs()
+	if err != nil {
+		r.logf("enumerating %s addresses for cleanup failed: %v", interfaceName, err)
+		return
+	}
+	// Unlike the live sweep's deletableAddrs, tailscaleAddrs keeps IPv6 too: a
+	// previous instance may have left a ULA orphan even though this process never
+	// brought IPv6 up. delAddress is idempotent, so a no-op v6 delete is harmless.
+	var removed []netip.Prefix
+	for p := range tailscaleAddrs(ifaceAddrs) {
+		if err := r.delAddress(p); err != nil {
+			r.logf("removing stale address %v from %s during cleanup failed: %v", p, interfaceName, err)
+			continue
+		}
+		removed = append(removed, p)
+	}
+	if len(removed) > 0 {
+		r.logf("removed %d stale Tailscale address(es) from %s during cleanup: %v", len(removed), interfaceName, removed)
 	}
 }
 

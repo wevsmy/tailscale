@@ -1,7 +1,7 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build (linux && !android) || android || (darwin && !ios) || freebsd || openbsd || plan9
+//go:build linux || (darwin && !ios) || freebsd || openbsd || plan9
 
 package tailssh
 
@@ -93,7 +93,7 @@ func defaultPathForUser(u *user.User) string {
 	}
 	isRoot := u.Uid == "0"
 	switch distro.Get() {
-	case distro.Debian:
+	case distro.Debian, distro.Crostini:
 		hi := hostinfo.New()
 		if hi.Distro == "ubuntu" {
 			// distro.Get's Debian includes Ubuntu. But see if it's actually Ubuntu.
@@ -107,6 +107,34 @@ func defaultPathForUser(u *user.User) string {
 		return "/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"
 	case distro.NixOS:
 		return defaultPathForUserOnNixOS(u)
+	}
+	if runtime.GOOS == "android" {
+		// На Android немає жодного з Unix-каталогів, які називають типові
+		// значення нижче: виміряно на Android 16 — існує лише /bin, і то як
+		// симлінк на /system/bin, а /usr/bin, /usr/local/bin і /sbin відсутні.
+		// Тож сесії працювали випадково, через той один симлінк.
+		//
+		// Кожен запис тут перевірено на існування на пристрої. /system/xbin і
+		// /sbin вилучено саме тому, що їх немає, а root-інструментарій у
+		// /data/adb/ksu/bin — бо PATH сесії не місце для нього; та сама логіка,
+		// що й у H5: що виконує root, не має вирішувати каталог, який може
+		// наповнити хтось інший.
+		sys := "/system/bin:/system_ext/bin:/vendor/bin:/apex/com.android.art/bin:/apex/com.android.runtime/bin"
+		// Власний bin-каталог застосунку йде першим, коли сесія належить цьому
+		// застосунку: вхід під uid термінального застосунку має знаходити
+		// інструменти, які той установив, точно як його власна оболонка.
+		// Каталог виводиться з дому, який lookup уже резолвив, тож менеджер
+		// пакетів не питають двічі. Додається лише для сесії ЦЬОГО uid —
+		// ніколи для root, чий PATH не має містити нічого, куди може писати
+		// не-root uid.
+		if strings.HasPrefix(u.HomeDir, "/data/data/") && !isRoot {
+			if root, ok := strings.CutSuffix(u.HomeDir, "/files/home"); ok {
+				if bin := root + "/files/usr/bin"; dirExists(bin) {
+					return bin + ":" + sys
+				}
+			}
+		}
+		return sys
 	}
 	if isRoot {
 		return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -150,4 +178,9 @@ func expandDefaultPathTmpl(t string, u *user.User) string {
 		return ""
 	}
 	return p
+}
+
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }

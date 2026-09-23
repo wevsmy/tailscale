@@ -1,0 +1,169 @@
+# fork delta manifest — regenerate with: scripts/android.sh manifest --write
+# Checked automatically after every cherry-pick by compat/update.
+# A '✓ tag' from git means the patch applied, not that it is all there.
+base v1.102.4
+head 9fc3f9bc4
+[files]
+178	0	.github/workflows/build_android.yml
+243	0	.github/workflows/upstream-watch.yml
+1	1	cmd/tailscale/cli/set.go
+1	1	cmd/tailscale/cli/up.go
+1	1	cmd/tailscaled/tailscaled.go
+86	0	docs/BUILD.md
+728	0	docs/superpowers/plans/2026-09-10-vau-tailscale.md
+245	0	docs/vau/AUDIT.md
+337	0	docs/vau/UPSTREAM.md
+1	0	envknob/featureknob/featureknob.go
+1	1	feature/ssh/ssh.go
+0	1	feature/taildrop/fileops_fs.go
+9	0	feature/taildrop/paths.go
+5	0	go.mod
+2	0	go.sum
+81	0	hostinfo/hostinfo_android.go
+22	9	ipn/ipnlocal/local.go
+0	3	ipn/ipnlocal/peerapi.go
+1	1	ipn/ipnserver/actor.go
+1	1	ipn/localapi/cert.go
+1	1	ipn/localapi/disabled_stubs.go
+10	0	logpolicy/logpolicy.go
+25	0	module/action.sh
+54	0	module/customize.sh
+7	0	module/module.prop
+336	0	module/service.sh
+0	0	module/skip_mount
+26	0	module/uninstall.sh
+157	0	module/update.sh
+758	0	module/webroot/index.html
+1	1	net/dns/direct_linux_test.go
+2	0	net/dns/direct_test.go
+1	1	net/dns/direct_unix_test.go
+197	0	net/dns/manager_android.go
+27	0	net/dns/manager_android_test.go
+1	1	net/dns/manager_default.go
+2	0	net/dns/manager_linux_test.go
+27	0	net/dns/resolvconfpath_android.go
+1	1	net/dns/resolvconfpath_default.go
+2	0	net/netmon/interfaces_android.go
+138	0	net/netmon/interfaces_androidroute_linux.go
+7	1	net/netmon/interfaces_linux.go
+31	9	net/netmon/netmon_linux.go
+51	0	net/netmon/netmon_linux_test.go
+1	1	net/netmon/netmon_polling.go
+19	0	net/netmon/state.go
+1	1	net/netns/netns_android.go
+15	1	net/netns/netns_linux.go
+1	1	net/tstun/tun.go
+19	1	paths/paths.go
+2	0	paths/paths_unix.go
+738	0	scripts/android.sh
+166	0	scripts/fork-manifest.txt
+35	0	scripts/sign.sh
+126	0	server/moto-watch.sh
+1	1	ssh/tailssh/c2n.go
+1	1	ssh/tailssh/hostkeys.go
+27	1	ssh/tailssh/incubator.go
+26	0	ssh/tailssh/incubator_android_test.go
+1	1	ssh/tailssh/incubator_linux.go
+1	1	ssh/tailssh/tailssh.go
+1	1	ssh/tailssh/tailssh_test.go
+34	1	ssh/tailssh/user.go
+14	15	tsconst/linuxfw.go
+4	0	tsweb/tsweb.go
+12	0	util/linuxfw/iptables.go
+75	1	util/linuxfw/iptables_runner.go
+29	0	util/osuser/group_ids.go
+8	0	util/osuser/user.go
+151	0	util/osuser/user_android.go
+148	0	util/osuser/user_android_test.go
+1	1	version/version_checkformat.go
+1	0	wgengine/pendopen.go
+157	0	wgengine/router/osrouter/router_androidrules_linux.go
+38	2	wgengine/router/osrouter/router_linux.go
+[markers]
+cmd/tailscale/cli/set.go	case "linux", "android":
+cmd/tailscale/cli/up.go	case "linux", "android":
+cmd/tailscaled/tailscaled.go	flag.BoolVar(&args.disableLogs, "no-logs-no-support", true, "disable log uploads; this also disables any technical support")
+envknob/featureknob/featureknob.go	case "android":
+feature/ssh/ssh.go	//go:build (linux || (darwin && !ios) || freebsd || openbsd || plan9) && !ts_omit_ssh
+feature/taildrop/paths.go	if err := os.MkdirAll(dir, 0o700); err == nil {
+go.mod	replace github.com/wlynxg/anet => github.com/BieHDC/anet v0.0.6-0.20241226223613-d47f8b766b3c
+go.mod	github.com/wlynxg/anet v0.0.5
+go.sum	github.com/BieHDC/anet v0.0.6-0.20241226223613-d47f8b766b3c/go.mod h1:eay5PRQr7fIVAMbTbchTnO9gG65Hg/uYGdc7mguHxoA=
+ipn/ipnlocal/local.go	RemoveCGNATDropRule: nm.HasCap(tailcfg.NodeAttrDisableLinuxCGNATDropRule) || runtime.GOOS == "android",
+ipn/ipnlocal/local.go	// peerCanProxyDNS каже true, але peerAPIBase порожній — повертаємо
+ipn/ipnserver/actor.go	case "darwin", "linux", "android", "illumos", "solaris", "openbsd", "freebsd":
+ipn/localapi/cert.go	//go:build !ios && !js && !ts_omit_acme
+ipn/localapi/disabled_stubs.go	//go:build ios || js || ts_omit_acme
+logpolicy/logpolicy.go	// ніхто цього не робить, і без нього логер мовчки писав би в cwd.
+net/dns/direct_linux_test.go	//go:build linux && !android
+net/dns/direct_test.go	//go:build !android && !ios
+net/dns/direct_unix_test.go	//go:build unix && !android
+net/dns/manager_default.go	//go:build !linux && !android && !freebsd && !openbsd && !windows && !darwin && !illumos && !solaris && !plan9
+net/dns/manager_linux_test.go	//go:build !android
+net/dns/resolvconfpath_default.go	//go:build !gokrazy && !android
+net/netmon/interfaces_android.go	//go:build ignore
+net/netmon/interfaces_linux.go	//go:build linux
+net/netmon/interfaces_linux.go	// Android: main порожня, а RTM_GETLINK для net.InterfaceByIndex закритий
+net/netmon/netmon_linux.go	//go:build linux
+net/netmon/netmon_linux.go	// It must be decoded as a RuleMessage: decoding it as a RouteMessage only
+net/netmon/netmon_linux.go	rd, err := parseRuleDeleted(msg.Data)
+net/netmon/netmon_linux.go	// monitor: ip rule deleted: {Table:254 Priority:5210}
+net/netmon/netmon_linux_test.go	Attributes: &rtnetlink.RuleAttributes{Priority: u32(5210), Table: u32(unix.RT_TABLE_MAIN)},
+net/netmon/netmon_polling.go	//go:build !linux && !freebsd && !windows && !darwin
+net/netmon/state.go	"github.com/wlynxg/anet"
+net/netmon/state.go	// На Android net.Interface.Addrs() не працює без netlink-дозволів — беремо
+net/netmon/state.go	// На Android net.Interfaces() не працює без netlink-дозволів — беремо
+net/netns/netns_android.go	//go:build ignore
+net/netns/netns_linux.go	//go:build linux
+net/netns/netns_linux.go	// unreachable. Приклад: примусовий HTTP_PROXY / HTTPS_PROXY на пристрої
+net/tstun/tun.go	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
+paths/paths.go	// AndroidBaseDir — кореневий каталог даних tailscaled на Android (Vau).
+paths/paths.go	return filepath.Join(AndroidBaseDir(), "tailscaled.sock")
+paths/paths.go	case "plan9", "android":
+paths/paths_unix.go	return filepath.Join(AndroidBaseDir(), "tailscaled.state")
+ssh/tailssh/c2n.go	//go:build linux || (darwin && !ios) || freebsd || openbsd || plan9
+ssh/tailssh/hostkeys.go	//go:build linux || (darwin && !ios) || freebsd || openbsd || plan9
+ssh/tailssh/incubator.go	//go:build linux || (darwin && !ios) || freebsd || openbsd
+ssh/tailssh/incubator.go	android = "android"
+ssh/tailssh/incubator.go	// перевірка на root відправляла б кожну сесію в exec.LookPath("login").
+ssh/tailssh/incubator.go	// Android: перенести в сесію ті змінні демона, без яких shell не працює
+ssh/tailssh/incubator.go	return []string{loginCmdPath}
+ssh/tailssh/incubator_linux.go	//go:build linux
+ssh/tailssh/tailssh.go	//go:build linux || (darwin && !ios) || freebsd || openbsd || plan9
+ssh/tailssh/tailssh_test.go	//go:build (linux && !android) || darwin
+ssh/tailssh/user.go	//go:build linux || (darwin && !ios) || freebsd || openbsd || plan9
+ssh/tailssh/user.go	sys := "/system/bin:/system_ext/bin:/vendor/bin:/apex/com.android.art/bin:/apex/com.android.runtime/bin"
+ssh/tailssh/user.go	func dirExists(p string) bool {
+tsconst/linuxfw.go	// Довідка: https://www.kxxt.dev/blog/full-tailscale-on-android-and-remote-unlocking/
+tsconst/linuxfw.go	LinuxFwmarkMask    = "0x1e000000"
+tsconst/linuxfw.go	LinuxSubnetRouteMark    = "0x8000000"
+tsconst/linuxfw.go	// Містить біт 17 (0x20000) ProtectedFromVPN, щоб обійти VPN-маршрутизацію Android.
+tsweb/tsweb.go	"tailscale.com/paths"
+tsweb/tsweb.go	return filepath.Join(paths.AndroidBaseDir(), "certs")
+util/linuxfw/iptables.go	if err := delTSHook(ipt, "mangle", "PREROUTING", logf); err != nil {
+util/linuxfw/iptables.go	if err := delChain(ipt, "mangle", "ts-prerouting"); err != nil {
+util/linuxfw/iptables_runner.go	"tailscale.com/envknob"
+util/linuxfw/iptables_runner.go	if err := divert(ipt, "mangle", "PREROUTING"); err != nil {
+util/linuxfw/iptables_runner.go	if err := create(ipt, "mangle", "ts-prerouting"); err != nil {
+util/linuxfw/iptables_runner.go	args = []string{dir, tunname, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"}
+util/linuxfw/iptables_runner.go	return i.addAndroidBase(i.ipt6, "v6", tunname, i.v6NATAvailable)
+util/linuxfw/iptables_runner.go	if err := delChain(ipt, "mangle", "ts-prerouting"); err != nil {
+util/linuxfw/iptables_runner.go	if err := del(ipt, "mangle", "ts-prerouting"); err != nil {
+util/linuxfw/iptables_runner.go	if err := delTSHook(ipt, "mangle", "PREROUTING", logf); err != nil {
+util/osuser/group_ids.go	out, err := exec.CommandContext(ctx, "/system/bin/id", "-G", who).Output()
+util/osuser/user.go	// overrideLookupFunc задають платформно-специфічні реалізації (user_android.go).
+util/osuser/user.go	// Android: свій lookup, бо немає ні getent, ні /etc/passwd
+version/version_checkformat.go	//go:build ignore
+wgengine/pendopen.go	// TODO: android also, but IPV6
+wgengine/router/osrouter/router_linux.go	//go:build linux
+wgengine/router/osrouter/router_linux.go	if runtime.GOOS == "android" && r.netMon != nil && r.unregNetMon == nil {
+wgengine/router/osrouter/router_linux.go	// Android: delIPRules вище прибрав правило 13001 для СТАРОЇ таблиці
+wgengine/router/osrouter/router_linux.go	return androidIPRules()
+wgengine/router/osrouter/router_linux.go	args = append(args, "not")
+wgengine/router/osrouter/router_linux.go	args = append(args, "iif", rule.IifName)
+wgengine/router/osrouter/router_linux.go	// Таблиці netd на Android (1023 для wlan0 тощо) не мають імен у
+wgengine/router/osrouter/router_linux.go	errAcc = r.androidUIDRules(false)
+[absent]
+feature/taildrop/fileops_fs.go	//go:build !android
+ipn/ipnlocal/peerapi.go	if runtime.GOOS == "android" {
+net/netmon/netmon_linux.go	c.logf("ip rule deleted: %+v", rmsg)

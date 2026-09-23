@@ -20,17 +20,34 @@ import (
 // and if that fails, it will fall back to the user.GroupIds method.
 func GetGroupIds(user *user.User) ([]string, error) {
 	if runtime.GOOS == "android" {
+		// У цих трьох рядках жили два баги. `id -Gz` на Android не існує
+		// взагалі (toybox: "Unknown option 'z'", перевірено на Android 16), а
+		// команда запускалась без імені користувача, тож відповідала за
+		// ДЕМОНА — кожна SSH-сесія отримувала групи root замість своїх.
+		// Fallback потім повертав зашитий {"0"}, тихо видаючи групу root
+		// будь-кому, хто спитав.
+		//
+		// Групи — це ідентичність Android-застосунку: без 3003 (inet) сесія
+		// не має мережі взагалі, а без 1077/1079 не бачить /sdcard. Тихо
+		// помилитися тут гірше, ніж впасти, тож помилка повертається тому,
+		// хто викликав.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if out, err := exec.CommandContext(ctx, "id", "-Gz").Output(); err == nil {
-			if len(out) > 0 {
-				return parseGroupIds(out), nil
-			}
+		who := user.Username
+		if who == "" {
+			who = user.Uid
 		}
-
-		return []string{"0"}, nil
+		out, err := exec.CommandContext(ctx, "/system/bin/id", "-G", who).Output()
+		if err != nil {
+			return nil, fmt.Errorf("running 'id -G %s': %w", who, err)
+		}
+		ids := parseGroupIds(out)
+		if len(ids) == 0 {
+			return nil, fmt.Errorf("'id -G %s' returned no groups", who)
+		}
+		return ids, nil
 	}
-	
+
 	if runtime.GOOS == "plan9" {
 		return nil, nil
 	}
