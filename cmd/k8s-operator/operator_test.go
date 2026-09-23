@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !plan9
@@ -24,13 +24,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
 	"tailscale.com/k8s-operator/apis/v1alpha1"
 	tsapi "tailscale.com/k8s-operator/apis/v1alpha1"
+	"tailscale.com/k8s-operator/tsclient"
 	"tailscale.com/kube/kubetypes"
 	"tailscale.com/net/dns/resolvconffile"
 	"tailscale.com/tstest"
 	"tailscale.com/tstime"
-	"tailscale.com/types/ptr"
 	"tailscale.com/util/dnsname"
 	"tailscale.com/util/mak"
 )
@@ -38,16 +39,13 @@ import (
 func TestLoadBalancerClass(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -66,7 +64,7 @@ func TestLoadBalancerClass(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				AnnotationTailnetTargetFQDN: "invalid.example.com",
 			},
@@ -74,7 +72,7 @@ func TestLoadBalancerClass(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 	})
 
@@ -97,7 +95,7 @@ func TestLoadBalancerClass(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 		Status: corev1.ServiceStatus{
 			Conditions: []metav1.Condition{{
@@ -122,6 +120,7 @@ func TestLoadBalancerClass(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	opts := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -172,6 +171,10 @@ func TestLoadBalancerClass(t *testing.T) {
 			},
 		},
 	}
+
+	// Perform an additional reconciliation loop here to ensure resources don't change through side effects. Mainly
+	// to prevent infinite reconciliation
+	expectReconciled(t, sr, "default", "test")
 	expectEqual(t, fc, want)
 
 	// Turn the service back into a ClusterIP service, which should make the
@@ -202,7 +205,7 @@ func TestLoadBalancerClass(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test",
 			Namespace: "default",
-			UID:       types.UID("1234-UID"),
+			UID:       "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "10.20.30.40",
@@ -215,17 +218,14 @@ func TestLoadBalancerClass(t *testing.T) {
 func TestTailnetTargetFQDNAnnotation(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	tailnetTargetFQDN := "foo.bar.ts.net."
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -243,7 +243,7 @@ func TestTailnetTargetFQDNAnnotation(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				AnnotationTailnetTargetFQDN: tailnetTargetFQDN,
 			},
@@ -260,6 +260,7 @@ func TestTailnetTargetFQDNAnnotation(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	o := configOpts{
+		replicas:          new(int32(1)),
 		stsName:           shortName,
 		secretName:        fullName,
 		namespace:         "default",
@@ -327,17 +328,14 @@ func TestTailnetTargetFQDNAnnotation(t *testing.T) {
 func TestTailnetTargetIPAnnotation(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	tailnetTargetIP := "100.66.66.66"
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -355,7 +353,7 @@ func TestTailnetTargetIPAnnotation(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				AnnotationTailnetTargetIP: tailnetTargetIP,
 			},
@@ -372,6 +370,7 @@ func TestTailnetTargetIPAnnotation(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	o := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -424,12 +423,12 @@ func TestTailnetTargetIPAnnotation(t *testing.T) {
 	})
 	expectReconciled(t, sr, "default", "test")
 
-	// // synchronous StatefulSet deletion triggers a requeue. But, the StatefulSet
-	// // didn't create any child resources since this is all faked, so the
-	// // deletion goes through immediately.
+	// synchronous StatefulSet deletion triggers a requeue. But, the StatefulSet
+	// didn't create any child resources since this is all faked, so the
+	// deletion goes through immediately.
 	expectReconciled(t, sr, "default", "test")
 	expectMissing[appsv1.StatefulSet](t, fc, "operator-ns", shortName)
-	// // The deletion triggers another reconcile, to finish the cleanup.
+	// The deletion triggers another reconcile, to finish the cleanup.
 	expectReconciled(t, sr, "default", "test")
 	expectMissing[appsv1.StatefulSet](t, fc, "operator-ns", shortName)
 	expectMissing[corev1.Service](t, fc, "operator-ns", shortName)
@@ -439,16 +438,13 @@ func TestTailnetTargetIPAnnotation(t *testing.T) {
 func TestTailnetTargetIPAnnotation_IPCouldNotBeParsed(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -463,7 +459,7 @@ func TestTailnetTargetIPAnnotation_IPCouldNotBeParsed(t *testing.T) {
 			Name:      "test",
 			Namespace: "default",
 
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				AnnotationTailnetTargetIP: tailnetTargetIP,
 			},
@@ -471,7 +467,7 @@ func TestTailnetTargetIPAnnotation_IPCouldNotBeParsed(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 	})
 
@@ -491,7 +487,7 @@ func TestTailnetTargetIPAnnotation_IPCouldNotBeParsed(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 		Status: corev1.ServiceStatus{
 			Conditions: []metav1.Condition{{
@@ -510,16 +506,13 @@ func TestTailnetTargetIPAnnotation_IPCouldNotBeParsed(t *testing.T) {
 func TestTailnetTargetIPAnnotation_InvalidIP(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -534,7 +527,7 @@ func TestTailnetTargetIPAnnotation_InvalidIP(t *testing.T) {
 			Name:      "test",
 			Namespace: "default",
 
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				AnnotationTailnetTargetIP: tailnetTargetIP,
 			},
@@ -542,7 +535,7 @@ func TestTailnetTargetIPAnnotation_InvalidIP(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 	})
 
@@ -562,7 +555,7 @@ func TestTailnetTargetIPAnnotation_InvalidIP(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 		Status: corev1.ServiceStatus{
 			Conditions: []metav1.Condition{{
@@ -581,16 +574,13 @@ func TestTailnetTargetIPAnnotation_InvalidIP(t *testing.T) {
 func TestAnnotations(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -608,7 +598,7 @@ func TestAnnotations(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				"tailscale.com/expose": "true",
 			},
@@ -623,6 +613,7 @@ func TestAnnotations(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	o := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -674,7 +665,7 @@ func TestAnnotations(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test",
 			Namespace: "default",
-			UID:       types.UID("1234-UID"),
+			UID:       "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "10.20.30.40",
@@ -687,16 +678,13 @@ func TestAnnotations(t *testing.T) {
 func TestAnnotationIntoLB(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -714,7 +702,7 @@ func TestAnnotationIntoLB(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				"tailscale.com/expose": "true",
 			},
@@ -729,6 +717,7 @@ func TestAnnotationIntoLB(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	o := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -779,7 +768,7 @@ func TestAnnotationIntoLB(t *testing.T) {
 	mustUpdate(t, fc, "default", "test", func(s *corev1.Service) {
 		delete(s.ObjectMeta.Annotations, "tailscale.com/expose")
 		s.Spec.Type = corev1.ServiceTypeLoadBalancer
-		s.Spec.LoadBalancerClass = ptr.To("tailscale")
+		s.Spec.LoadBalancerClass = new("tailscale")
 	})
 	expectReconciled(t, sr, "default", "test")
 	// None of the proxy machinery should have changed...
@@ -792,12 +781,12 @@ func TestAnnotationIntoLB(t *testing.T) {
 			Name:       "test",
 			Namespace:  "default",
 			Finalizers: []string{"tailscale.com/finalizer"},
-			UID:        types.UID("1234-UID"),
+			UID:        "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 		Status: corev1.ServiceStatus{
 			LoadBalancer: corev1.LoadBalancerStatus{
@@ -819,16 +808,13 @@ func TestAnnotationIntoLB(t *testing.T) {
 func TestLBIntoAnnotation(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -846,12 +832,12 @@ func TestLBIntoAnnotation(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 	})
 
@@ -859,6 +845,7 @@ func TestLBIntoAnnotation(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	o := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -894,7 +881,7 @@ func TestLBIntoAnnotation(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 		Status: corev1.ServiceStatus{
 			LoadBalancer: corev1.LoadBalancerStatus{
@@ -940,7 +927,7 @@ func TestLBIntoAnnotation(t *testing.T) {
 			Annotations: map[string]string{
 				"tailscale.com/expose": "true",
 			},
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "10.20.30.40",
@@ -956,16 +943,13 @@ func TestLBIntoAnnotation(t *testing.T) {
 func TestCustomHostname(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -983,7 +967,7 @@ func TestCustomHostname(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				"tailscale.com/expose":   "true",
 				"tailscale.com/hostname": "reindeer-flotilla",
@@ -999,6 +983,7 @@ func TestCustomHostname(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	o := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -1051,7 +1036,7 @@ func TestCustomHostname(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test",
 			Namespace: "default",
-			UID:       types.UID("1234-UID"),
+			UID:       "1234-UID",
 			Annotations: map[string]string{
 				"tailscale.com/hostname": "reindeer-flotilla",
 			},
@@ -1067,16 +1052,13 @@ func TestCustomHostname(t *testing.T) {
 func TestCustomPriorityClassName(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:                 fc,
-			tsClient:               ft,
+			clients:                tsclient.NewProvider(ft),
 			defaultTags:            []string{"tag:k8s"},
 			operatorNamespace:      "operator-ns",
 			proxyImage:             "tailscale/tailscale",
@@ -1095,7 +1077,7 @@ func TestCustomPriorityClassName(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				"tailscale.com/expose":   "true",
 				"tailscale.com/hostname": "tailscale-critical",
@@ -1111,6 +1093,7 @@ func TestCustomPriorityClassName(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	o := configOpts{
+		replicas:          new(int32(1)),
 		stsName:           shortName,
 		secretName:        fullName,
 		namespace:         "default",
@@ -1231,7 +1214,7 @@ func TestServiceProxyClassAnnotation(t *testing.T) {
 				Client: fc,
 				ssr: &tailscaleSTSReconciler{
 					Client:            fc,
-					tsClient:          ft,
+					clients:           tsclient.NewProvider(ft),
 					defaultTags:       []string{"tag:k8s"},
 					operatorNamespace: "operator-ns",
 					proxyImage:        "tailscale/tailscale",
@@ -1270,8 +1253,8 @@ func TestServiceProxyClassAnnotation(t *testing.T) {
 			slist := &corev1.SecretList{}
 			fc.List(context.Background(), slist, client.InNamespace("operator-ns"))
 			for _, i := range slist.Items {
-				l, _ := json.Marshal(i.Labels)
-				t.Logf("found secret %q with labels %q ", i.Name, string(l))
+				labels, _ := json.Marshal(i.Labels)
+				t.Logf("found secret %q with labels %q ", i.Name, string(labels))
 			}
 
 			_, shortName := findGenName(t, fc, "default", "test", "svc")
@@ -1321,16 +1304,13 @@ func TestProxyClassForService(t *testing.T) {
 		WithStatusSubresource(pc).
 		Build()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -1348,17 +1328,18 @@ func TestProxyClassForService(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 	})
 	expectReconciled(t, sr, "default", "test")
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	opts := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -1412,16 +1393,13 @@ func TestProxyClassForService(t *testing.T) {
 func TestDefaultLoadBalancer(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -1440,7 +1418,7 @@ func TestDefaultLoadBalancer(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "10.20.30.40",
@@ -1454,6 +1432,7 @@ func TestDefaultLoadBalancer(t *testing.T) {
 
 	expectEqual(t, fc, expectedHeadlessService(shortName, "svc"))
 	o := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -1468,16 +1447,13 @@ func TestDefaultLoadBalancer(t *testing.T) {
 func TestProxyFirewallMode(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -1497,7 +1473,7 @@ func TestProxyFirewallMode(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "10.20.30.40",
@@ -1509,6 +1485,7 @@ func TestProxyFirewallMode(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	o := configOpts{
+		replicas:        new(int32(1)),
 		stsName:         shortName,
 		secretName:      fullName,
 		namespace:       "default",
@@ -1523,24 +1500,28 @@ func TestProxyFirewallMode(t *testing.T) {
 
 func Test_isMagicDNSName(t *testing.T) {
 	tests := []struct {
+		name string
 		in   string
 		want bool
 	}{
 		{
+			name: "foo-tail4567-ts-net",
 			in:   "foo.tail4567.ts.net",
 			want: true,
 		},
 		{
+			name: "foo-tail4567-ts-net-trailing-dot",
 			in:   "foo.tail4567.ts.net.",
 			want: true,
 		},
 		{
+			name: "foo-tail4567",
 			in:   "foo.tail4567",
 			want: false,
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			if got := isMagicDNSName(tt.in); got != tt.want {
 				t.Errorf("isMagicDNSName(%q) = %v, want %v", tt.in, got, tt.want)
 			}
@@ -1548,12 +1529,70 @@ func Test_isMagicDNSName(t *testing.T) {
 	}
 }
 
-func Test_serviceHandlerForIngress(t *testing.T) {
+func Test_HeadlessService(t *testing.T) {
 	fc := fake.NewFakeClient()
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
+	zl := zap.Must(zap.NewDevelopment())
+	clock := tstest.NewClock(tstest.ClockOpts{})
+	sr := &ServiceReconciler{
+		Client: fc,
+		ssr: &tailscaleSTSReconciler{
+			Client: fc,
+		},
+		logger:   zl.Sugar(),
+		clock:    clock,
+		recorder: record.NewFakeRecorder(100),
 	}
+	mustCreate(t, fc, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "default",
+
+			UID: "1234-UID",
+			Annotations: map[string]string{
+				AnnotationExpose: "true",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Type:      corev1.ServiceTypeClusterIP,
+		},
+	})
+
+	expectReconciled(t, sr, "default", "test")
+
+	t0 := conditionTime(clock)
+
+	want := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "default",
+			UID:       types.UID("1234-UID"),
+			Annotations: map[string]string{
+				AnnotationExpose: "true",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Type:      corev1.ServiceTypeClusterIP,
+		},
+		Status: corev1.ServiceStatus{
+			Conditions: []metav1.Condition{{
+				Type:               string(tsapi.ProxyReady),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: t0,
+				Reason:             reasonProxyInvalid,
+				Message:            `unable to provision proxy resources: invalid Service: headless Services are not supported.`,
+			}},
+		},
+	}
+
+	expectEqual(t, fc, want)
+}
+
+func Test_serviceHandlerForIngress(t *testing.T) {
+	const tailscaleIngressClassName = "tailscale"
+	fc := fake.NewFakeClient()
+	zl := zap.Must(zap.NewDevelopment())
 
 	// 1. An event on a headless Service for a tailscale Ingress results in
 	// the Ingress being reconciled.
@@ -1562,7 +1601,7 @@ func Test_serviceHandlerForIngress(t *testing.T) {
 			Name:      "ing-1",
 			Namespace: "ns-1",
 		},
-		Spec: networkingv1.IngressSpec{IngressClassName: ptr.To(tailscaleIngressClassName)},
+		Spec: networkingv1.IngressSpec{IngressClassName: new(tailscaleIngressClassName)},
 	})
 	svc1 := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1578,7 +1617,7 @@ func Test_serviceHandlerForIngress(t *testing.T) {
 	}
 	mustCreate(t, fc, svc1)
 	wantReqs := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "ns-1", Name: "ing-1"}}}
-	gotReqs := serviceHandlerForIngress(fc, zl.Sugar())(context.Background(), svc1)
+	gotReqs := serviceHandlerForIngress(fc, zl.Sugar(), tailscaleIngressClassName)(context.Background(), svc1)
 	if diff := cmp.Diff(gotReqs, wantReqs); diff != "" {
 		t.Fatalf("unexpected reconcile requests (-got +want):\n%s", diff)
 	}
@@ -1594,7 +1633,7 @@ func Test_serviceHandlerForIngress(t *testing.T) {
 			DefaultBackend: &networkingv1.IngressBackend{
 				Service: &networkingv1.IngressServiceBackend{Name: "def-backend"},
 			},
-			IngressClassName: ptr.To(tailscaleIngressClassName),
+			IngressClassName: new(tailscaleIngressClassName),
 		},
 	})
 	backendSvc := &corev1.Service{
@@ -1605,7 +1644,7 @@ func Test_serviceHandlerForIngress(t *testing.T) {
 	}
 	mustCreate(t, fc, backendSvc)
 	wantReqs = []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "ns-2", Name: "ing-2"}}}
-	gotReqs = serviceHandlerForIngress(fc, zl.Sugar())(context.Background(), backendSvc)
+	gotReqs = serviceHandlerForIngress(fc, zl.Sugar(), tailscaleIngressClassName)(context.Background(), backendSvc)
 	if diff := cmp.Diff(gotReqs, wantReqs); diff != "" {
 		t.Fatalf("unexpected reconcile requests (-got +want):\n%s", diff)
 	}
@@ -1618,7 +1657,7 @@ func Test_serviceHandlerForIngress(t *testing.T) {
 			Namespace: "ns-3",
 		},
 		Spec: networkingv1.IngressSpec{
-			IngressClassName: ptr.To(tailscaleIngressClassName),
+			IngressClassName: new(tailscaleIngressClassName),
 			Rules: []networkingv1.IngressRule{{IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
 				Paths: []networkingv1.HTTPIngressPath{
 					{Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: "backend"}}},
@@ -1634,7 +1673,7 @@ func Test_serviceHandlerForIngress(t *testing.T) {
 	}
 	mustCreate(t, fc, backendSvc2)
 	wantReqs = []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "ns-3", Name: "ing-3"}}}
-	gotReqs = serviceHandlerForIngress(fc, zl.Sugar())(context.Background(), backendSvc2)
+	gotReqs = serviceHandlerForIngress(fc, zl.Sugar(), tailscaleIngressClassName)(context.Background(), backendSvc2)
 	if diff := cmp.Diff(gotReqs, wantReqs); diff != "" {
 		t.Fatalf("unexpected reconcile requests (-got +want):\n%s", diff)
 	}
@@ -1661,7 +1700,7 @@ func Test_serviceHandlerForIngress(t *testing.T) {
 		},
 	}
 	mustCreate(t, fc, nonTSBackend)
-	gotReqs = serviceHandlerForIngress(fc, zl.Sugar())(context.Background(), nonTSBackend)
+	gotReqs = serviceHandlerForIngress(fc, zl.Sugar(), tailscaleIngressClassName)(context.Background(), nonTSBackend)
 	if len(gotReqs) > 0 {
 		t.Errorf("unexpected reconcile request for a Service that does not belong to a Tailscale Ingress: %#+v\n", gotReqs)
 	}
@@ -1675,17 +1714,47 @@ func Test_serviceHandlerForIngress(t *testing.T) {
 		},
 	}
 	mustCreate(t, fc, someSvc)
-	gotReqs = serviceHandlerForIngress(fc, zl.Sugar())(context.Background(), someSvc)
+	gotReqs = serviceHandlerForIngress(fc, zl.Sugar(), tailscaleIngressClassName)(context.Background(), someSvc)
 	if len(gotReqs) > 0 {
 		t.Errorf("unexpected reconcile request for a Service that does not belong to any Ingress: %#+v\n", gotReqs)
 	}
 }
 
-func Test_clusterDomainFromResolverConf(t *testing.T) {
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
+func Test_serviceHandlerForIngress_multipleIngressClasses(t *testing.T) {
+	fc := fake.NewFakeClient()
+	zl := zap.Must(zap.NewDevelopment())
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "backend", Namespace: "default"},
 	}
+	mustCreate(t, fc, svc)
+
+	mustCreate(t, fc, &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "nginx-ing", Namespace: "default"},
+		Spec: networkingv1.IngressSpec{
+			IngressClassName: new("nginx"),
+			DefaultBackend:   &networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: "backend"}},
+		},
+	})
+
+	mustCreate(t, fc, &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "ts-ing", Namespace: "default"},
+		Spec: networkingv1.IngressSpec{
+			IngressClassName: new("tailscale"),
+			DefaultBackend:   &networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: "backend"}},
+		},
+	})
+
+	got := serviceHandlerForIngress(fc, zl.Sugar(), "tailscale")(context.Background(), svc)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "default", Name: "ts-ing"}}}
+
+	if diff := cmp.Diff(got, want); diff != "" {
+		t.Fatalf("unexpected reconcile requests (-got +want):\n%s", diff)
+	}
+}
+
+func Test_clusterDomainFromResolverConf(t *testing.T) {
+	zl := zap.Must(zap.NewDevelopment())
 	tests := []struct {
 		name      string
 		conf      *resolvconffile.Config
@@ -1693,7 +1762,7 @@ func Test_clusterDomainFromResolverConf(t *testing.T) {
 		want      string
 	}{
 		{
-			name: "success- custom domain",
+			name: "success-custom-domain",
 			conf: &resolvconffile.Config{
 				SearchDomains: []dnsname.FQDN{toFQDN(t, "foo.svc.department.org.io"), toFQDN(t, "svc.department.org.io"), toFQDN(t, "department.org.io")},
 			},
@@ -1701,7 +1770,7 @@ func Test_clusterDomainFromResolverConf(t *testing.T) {
 			want:      "department.org.io",
 		},
 		{
-			name: "success- default domain",
+			name: "success-default-domain",
 			conf: &resolvconffile.Config{
 				SearchDomains: []dnsname.FQDN{toFQDN(t, "foo.svc.cluster.local."), toFQDN(t, "svc.cluster.local."), toFQDN(t, "cluster.local.")},
 			},
@@ -1709,7 +1778,7 @@ func Test_clusterDomainFromResolverConf(t *testing.T) {
 			want:      "cluster.local",
 		},
 		{
-			name: "only two search domains found",
+			name: "only-two-search-domains",
 			conf: &resolvconffile.Config{
 				SearchDomains: []dnsname.FQDN{toFQDN(t, "svc.department.org.io"), toFQDN(t, "department.org.io")},
 			},
@@ -1717,7 +1786,7 @@ func Test_clusterDomainFromResolverConf(t *testing.T) {
 			want:      "cluster.local",
 		},
 		{
-			name: "first search domain does not match the expected structure",
+			name: "first-search-domain-mismatch",
 			conf: &resolvconffile.Config{
 				SearchDomains: []dnsname.FQDN{toFQDN(t, "foo.bar.department.org.io"), toFQDN(t, "svc.department.org.io"), toFQDN(t, "some.other.fqdn")},
 			},
@@ -1725,7 +1794,7 @@ func Test_clusterDomainFromResolverConf(t *testing.T) {
 			want:      "cluster.local",
 		},
 		{
-			name: "second search domain does not match the expected structure",
+			name: "second-search-domain-mismatch",
 			conf: &resolvconffile.Config{
 				SearchDomains: []dnsname.FQDN{toFQDN(t, "foo.svc.department.org.io"), toFQDN(t, "foo.department.org.io"), toFQDN(t, "some.other.fqdn")},
 			},
@@ -1733,7 +1802,7 @@ func Test_clusterDomainFromResolverConf(t *testing.T) {
 			want:      "cluster.local",
 		},
 		{
-			name: "third search domain does not match the expected structure",
+			name: "third-search-domain-mismatch",
 			conf: &resolvconffile.Config{
 				SearchDomains: []dnsname.FQDN{toFQDN(t, "foo.svc.department.org.io"), toFQDN(t, "svc.department.org.io"), toFQDN(t, "some.other.fqdn")},
 			},
@@ -1753,10 +1822,7 @@ func Test_clusterDomainFromResolverConf(t *testing.T) {
 func Test_authKeyRemoval(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 
 	// 1. A new Service that should be exposed via Tailscale gets created, a Secret with a config that contains auth
 	// key is generated.
@@ -1765,7 +1831,7 @@ func Test_authKeyRemoval(t *testing.T) {
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -1778,12 +1844,12 @@ func Test_authKeyRemoval(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test",
 			Namespace: "default",
-			UID:       types.UID("1234-UID"),
+			UID:       "1234-UID",
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 	})
 
@@ -1798,6 +1864,7 @@ func Test_authKeyRemoval(t *testing.T) {
 		hostname:        "default-test",
 		clusterTargetIP: "10.20.30.40",
 		app:             kubetypes.AppIngressProxy,
+		replicas:        new(int32(1)),
 	}
 
 	expectEqual(t, fc, expectedSecret(t, fc, opts))
@@ -1820,10 +1887,7 @@ func Test_authKeyRemoval(t *testing.T) {
 func Test_externalNameService(t *testing.T) {
 	fc := fake.NewFakeClient()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 
 	// 1. A External name Service that should be exposed via Tailscale gets
 	// created.
@@ -1832,7 +1896,7 @@ func Test_externalNameService(t *testing.T) {
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -1850,7 +1914,7 @@ func Test_externalNameService(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				AnnotationExpose: "true",
 			},
@@ -1865,6 +1929,7 @@ func Test_externalNameService(t *testing.T) {
 
 	fullName, shortName := findGenName(t, fc, "default", "test", "svc")
 	opts := configOpts{
+		replicas:         new(int32(1)),
 		stsName:          shortName,
 		secretName:       fullName,
 		namespace:        "default",
@@ -1909,7 +1974,7 @@ func Test_metricsResourceCreation(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:         "10.20.30.40",
 			Type:              corev1.ServiceTypeLoadBalancer,
-			LoadBalancerClass: ptr.To("tailscale"),
+			LoadBalancerClass: new("tailscale"),
 		},
 	}
 	crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: serviceMonitorCRD}}
@@ -1919,16 +1984,13 @@ func Test_metricsResourceCreation(t *testing.T) {
 		WithStatusSubresource(pc).
 		Build()
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			operatorNamespace: "operator-ns",
 		},
 		logger: zl.Sugar(),
@@ -1993,16 +2055,13 @@ func TestIgnorePGService(t *testing.T) {
 	_, _, fc, _, _ := setupServiceTest(t)
 
 	ft := &fakeTSClient{}
-	zl, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	zl := zap.Must(zap.NewDevelopment())
 	clock := tstest.NewClock(tstest.ClockOpts{})
 	sr := &ServiceReconciler{
 		Client: fc,
 		ssr: &tailscaleSTSReconciler{
 			Client:            fc,
-			tsClient:          ft,
+			clients:           tsclient.NewProvider(ft),
 			defaultTags:       []string{"tag:k8s"},
 			operatorNamespace: "operator-ns",
 			proxyImage:        "tailscale/tailscale",
@@ -2020,7 +2079,7 @@ func TestIgnorePGService(t *testing.T) {
 			// The apiserver is supposed to set the UID, but the fake client
 			// doesn't. So, set it explicitly because other code later depends
 			// on it being set.
-			UID: types.UID("1234-UID"),
+			UID: "1234-UID",
 			Annotations: map[string]string{
 				"tailscale.com/proxygroup": "test-pg",
 			},
@@ -2034,6 +2093,58 @@ func TestIgnorePGService(t *testing.T) {
 	expectReconciled(t, sr, "default", "test")
 
 	findNoGenName(t, fc, "default", "test", "svc")
+}
+
+// Regression test: the service-pg-reconciler used to watch ProxyGroups with
+// ingressesFromIngressProxyGroup, which lists Ingresses and returns Ingress
+// keys. Fed to the Service reconciler those keys never match a Service, so a
+// ProxyGroup becoming Available did not re-enqueue the HA Services waiting on
+// it and provisioning only happened on the next operator restart (full
+// re-list).
+func Test_servicesFromIngressProxyGroup(t *testing.T) {
+	ingressPG := &tsapi.ProxyGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "ingress-pg"},
+		Spec:       tsapi.ProxyGroupSpec{Type: tsapi.ProxyGroupTypeIngress},
+	}
+	egressPG := &tsapi.ProxyGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "egress-pg"},
+		Spec:       tsapi.ProxyGroupSpec{Type: tsapi.ProxyGroupTypeEgress},
+	}
+	svcForIngressPG := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "svc-1",
+			Namespace:   "ns-1",
+			Annotations: map[string]string{AnnotationProxyGroup: "ingress-pg"},
+		},
+	}
+	svcForOtherPG := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "svc-2",
+			Namespace:   "ns-2",
+			Annotations: map[string]string{AnnotationProxyGroup: "other-pg"},
+		},
+	}
+	fc := fake.NewClientBuilder().
+		WithScheme(tsapi.GlobalScheme).
+		WithObjects(svcForIngressPG, svcForOtherPG).
+		WithIndex(new(corev1.Service), indexIngressProxyGroup, indexPGIngresses).
+		Build()
+	zl := zap.Must(zap.NewDevelopment())
+	h := servicesFromIngressProxyGroup(fc, zl.Sugar())
+
+	// An event on an ingress ProxyGroup enqueues only the Services that are
+	// annotated for it.
+	gotReqs := h(t.Context(), ingressPG)
+	wantReqs := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "ns-1", Name: "svc-1"}}}
+	if diff := cmp.Diff(gotReqs, wantReqs); diff != "" {
+		t.Errorf("servicesFromIngressProxyGroup(ingress-pg) mismatch (-got +want):\n%s", diff)
+	}
+
+	// An egress ProxyGroup is handled by a different reconciler and must not
+	// enqueue anything here.
+	if gotReqs := h(t.Context(), egressPG); len(gotReqs) != 0 {
+		t.Errorf("servicesFromIngressProxyGroup(egress-pg) = %v, want none", gotReqs)
+	}
 }
 
 func toFQDN(t *testing.T, s string) dnsname.FQDN {

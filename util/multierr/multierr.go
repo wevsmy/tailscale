@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package multierr provides a simple multiple-error type.
@@ -47,6 +47,7 @@ func (e Error) Unwrap() []error {
 // If the resulting slice has length 0, New returns nil.
 // If the resulting slice has length 1, New returns that error.
 // If the resulting slice has length > 1, New returns that slice as an Error.
+// Deprecated: use [errors.Join] instead. See #17379.
 func New(errs ...error) error {
 	// First count the number of errors to avoid allocating.
 	var n int

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package tka
@@ -27,12 +27,10 @@ func (s signer25519) SignAUM(sigHash tkatype.AUMSigHash) ([]tkatype.Signature, e
 func TestAuthorityBuilderAddKey(t *testing.T) {
 	pub, priv := testingKey25519(t, 1)
 	key := Key{Kind: Key25519, Public: pub, Votes: 2}
+	state := CreateStateForTest(key)
 
-	storage := &Mem{}
-	a, _, err := Create(storage, State{
-		Keys:               []Key{key},
-		DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-	}, signer25519(priv))
+	storage := ChonkMem()
+	a, _, err := Create(storage, state, signer25519(priv))
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
@@ -58,18 +56,58 @@ func TestAuthorityBuilderAddKey(t *testing.T) {
 		t.Errorf("could not read new key: %v", err)
 	}
 }
+func TestAuthorityBuilderMaxKey(t *testing.T) {
+	pub, priv := testingKey25519(t, 1)
+	key := Key{Kind: Key25519, Public: pub, Votes: 2}
+	state := CreateStateForTest(key)
+
+	storage := ChonkMem()
+	a, _, err := Create(storage, state, signer25519(priv))
+	if err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+
+	for i := 0; i <= maxKeys; i++ {
+		pub2, _ := testingKey25519(t, int64(2+i))
+		key2 := Key{Kind: Key25519, Public: pub2, Votes: 1}
+
+		b := a.NewUpdater(signer25519(priv))
+		err := b.AddKey(key2)
+		if i < maxKeys-1 {
+			if err != nil {
+				t.Fatalf("AddKey(%v) failed: %v", key2, err)
+			}
+		} else {
+			// Too many keys.
+			if err == nil {
+				t.Fatalf("AddKey(%v) succeeded unexpectedly", key2)
+			}
+			continue
+		}
+
+		updates, err := b.Finalize(storage)
+		if err != nil {
+			t.Fatalf("Finalize() failed: %v", err)
+		}
+
+		if err := a.Inform(storage, updates); err != nil {
+			t.Fatalf("could not apply generated updates: %v", err)
+		}
+		if _, err := a.state.GetKey(key2.MustID()); err != nil {
+			t.Errorf("could not read new key: %v", err)
+		}
+	}
+}
 
 func TestAuthorityBuilderRemoveKey(t *testing.T) {
 	pub, priv := testingKey25519(t, 1)
 	key := Key{Kind: Key25519, Public: pub, Votes: 2}
 	pub2, _ := testingKey25519(t, 2)
 	key2 := Key{Kind: Key25519, Public: pub2, Votes: 1}
+	state := CreateStateForTest(key, key2)
 
-	storage := &Mem{}
-	a, _, err := Create(storage, State{
-		Keys:               []Key{key, key2},
-		DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-	}, signer25519(priv))
+	storage := ChonkMem()
+	a, _, err := Create(storage, state, signer25519(priv))
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
@@ -110,12 +148,10 @@ func TestAuthorityBuilderRemoveKey(t *testing.T) {
 func TestAuthorityBuilderSetKeyVote(t *testing.T) {
 	pub, priv := testingKey25519(t, 1)
 	key := Key{Kind: Key25519, Public: pub, Votes: 2}
+	state := CreateStateForTest(key)
 
-	storage := &Mem{}
-	a, _, err := Create(storage, State{
-		Keys:               []Key{key},
-		DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-	}, signer25519(priv))
+	storage := ChonkMem()
+	a, _, err := Create(storage, state, signer25519(priv))
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
@@ -146,12 +182,10 @@ func TestAuthorityBuilderSetKeyVote(t *testing.T) {
 func TestAuthorityBuilderSetKeyMeta(t *testing.T) {
 	pub, priv := testingKey25519(t, 1)
 	key := Key{Kind: Key25519, Public: pub, Votes: 2, Meta: map[string]string{"a": "b"}}
+	state := CreateStateForTest(key)
 
-	storage := &Mem{}
-	a, _, err := Create(storage, State{
-		Keys:               []Key{key},
-		DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-	}, signer25519(priv))
+	storage := ChonkMem()
+	a, _, err := Create(storage, state, signer25519(priv))
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
@@ -182,12 +216,10 @@ func TestAuthorityBuilderSetKeyMeta(t *testing.T) {
 func TestAuthorityBuilderMultiple(t *testing.T) {
 	pub, priv := testingKey25519(t, 1)
 	key := Key{Kind: Key25519, Public: pub, Votes: 2}
+	state := CreateStateForTest(key)
 
-	storage := &Mem{}
-	a, _, err := Create(storage, State{
-		Keys:               []Key{key},
-		DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-	}, signer25519(priv))
+	storage := ChonkMem()
+	a, _, err := Create(storage, state, signer25519(priv))
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
@@ -230,12 +262,10 @@ func TestAuthorityBuilderMultiple(t *testing.T) {
 func TestAuthorityBuilderCheckpointsAfterXUpdates(t *testing.T) {
 	pub, priv := testingKey25519(t, 1)
 	key := Key{Kind: Key25519, Public: pub, Votes: 2}
+	state := CreateStateForTest(key)
 
-	storage := &Mem{}
-	a, _, err := Create(storage, State{
-		Keys:               []Key{key},
-		DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-	}, signer25519(priv))
+	storage := ChonkMem()
+	a, _, err := Create(storage, state, signer25519(priv))
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}

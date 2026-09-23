@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build ts_macext && (darwin || ios)
@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/netip"
 
-	"tailscale.com/net/netmon"
 	"tailscale.com/net/netns"
 )
 
@@ -21,10 +20,11 @@ func init() {
 // initListenConfigNetworkExtension configures nc for listening on IP
 // through the iOS/macOS Network/System Extension (Packet Tunnel
 // Provider) sandbox.
-func initListenConfigNetworkExtension(nc *net.ListenConfig, ip netip.Addr, st *netmon.State, tunIfName string) error {
-	tunIf, ok := st.Interface[tunIfName]
-	if !ok {
-		return fmt.Errorf("no interface with name %q", tunIfName)
+func initListenConfigNetworkExtension(nc *net.ListenConfig, ip netip.Addr, ifaceIndex int) error {
+	// A zero ifaceIndex is invalid for peerapi. A zero value will not get us
+	// out of the network sandbox. Caller should log and retry.
+	if ifaceIndex == 0 {
+		return fmt.Errorf("peerapi: cannot listen on %s with ifaceIndex 0", ip)
 	}
-	return netns.SetListenConfigInterfaceIndex(nc, tunIf.Index)
+	return netns.SetListenConfigInterfaceIndex(nc, ifaceIndex)
 }

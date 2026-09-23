@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package tpm
@@ -131,6 +131,31 @@ func TestStore(t *testing.T) {
 		checkState(t, store, k1, v1)
 		checkState(t, store, k2, v2)
 	})
+}
+
+func BenchmarkInfo(b *testing.B) {
+	b.StopTimer()
+	skipWithoutTPM(b)
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		hi := info()
+		if hi == nil {
+			b.Fatalf("tpm info error")
+		}
+	}
+	b.StopTimer()
+}
+
+func BenchmarkTPMSupported(b *testing.B) {
+	b.StopTimer()
+	skipWithoutTPM(b)
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		if !tpmSupported() {
+			b.Fatalf("tpmSupported returned false")
+		}
+	}
+	b.StopTimer()
 }
 
 func BenchmarkStore(b *testing.B) {
@@ -275,15 +300,6 @@ func TestMigrateStateToTPM(t *testing.T) {
 			}
 		})
 	}
-}
-
-func tpmSupported() bool {
-	tpm, err := open()
-	if err != nil {
-		return false
-	}
-	tpm.Close()
-	return true
 }
 
 type mockTPMSealProvider struct {

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package tpm implements support for TPM 2.0 devices.
@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -22,29 +23,84 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 	"golang.org/x/crypto/nacl/secretbox"
 	"tailscale.com/atomicfile"
+	"tailscale.com/envknob"
 	"tailscale.com/feature"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/store"
 	"tailscale.com/paths"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/util/testenv"
 )
 
-var infoOnce = sync.OnceValue(info)
+var (
+	infoOnce         = sync.OnceValue(info)
+	tpmSupportedOnce = sync.OnceValue(tpmSupported)
+)
 
 func init() {
-	feature.Register("tpm")
+	if !feature.Register("tpm") {
+		return
+	}
+	feature.HookTPMAvailable.Set(tpmSupportedOnce)
+	feature.HookHardwareAttestationAvailable.Set(tpmSupportedOnce)
+
 	hostinfo.RegisterHostinfoNewHook(func(hi *tailcfg.Hostinfo) {
 		hi.TPM = infoOnce()
 	})
 	store.Register(store.TPMPrefix, newStore)
+	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
+		key.RegisterHardwareAttestationKeyFns(
+			func() key.HardwareAttestationKey { return &attestationKey{} },
+			func() (key.HardwareAttestationKey, error) { return newAttestationKey() },
+		)
+	}
 }
 
-func info() *tailcfg.TPMInfo {
+func tpmSupported() bool {
+	hi := infoOnce()
+	if hi == nil {
+		return false
+	}
+	if hi.FamilyIndicator != "2.0" {
+		return false
+	}
+
 	tpm, err := open()
 	if err != nil {
+		return false
+	}
+	defer tpm.Close()
+
+	if err := withSRK(logger.Discard, tpm, func(srk tpm2.AuthHandle) error {
 		return nil
+	}); err != nil {
+		return false
+	}
+	return true
+}
+
+var verboseTPM = envknob.RegisterBool("TS_DEBUG_TPM")
+
+func info() *tailcfg.TPMInfo {
+	logf := logger.Discard
+	if !testenv.InTest() || verboseTPM() {
+		logf = log.New(log.Default().Writer(), "TPM: ", 0).Printf
+	}
+
+	tpm, err := open()
+	if err != nil {
+		if !os.IsNotExist(err) || verboseTPM() {
+			// Only log if it's an interesting error, not just "no TPM",
+			// as is very common, especially in VMs.
+			logf("error opening: %v", err)
+		}
+		return nil
+	}
+	if verboseTPM() {
+		logf("successfully opened")
 	}
 	defer tpm.Close()
 
@@ -67,6 +123,7 @@ func info() *tailcfg.TPMInfo {
 		{tpm2.TPMPTVendorTPMType, func(info *tailcfg.TPMInfo, value uint32) { info.Model = int(value) }},
 		{tpm2.TPMPTFirmwareVersion1, func(info *tailcfg.TPMInfo, value uint32) { info.FirmwareVersion += uint64(value) << 32 }},
 		{tpm2.TPMPTFirmwareVersion2, func(info *tailcfg.TPMInfo, value uint32) { info.FirmwareVersion += uint64(value) }},
+		{tpm2.TPMPTFamilyIndicator, toStr(&info.FamilyIndicator)},
 	} {
 		resp, err := tpm2.GetCapability{
 			Capability:    tpm2.TPMCapTPMProperties,
@@ -74,10 +131,12 @@ func info() *tailcfg.TPMInfo {
 			PropertyCount: 1,
 		}.Execute(tpm)
 		if err != nil {
+			logf("GetCapability %v: %v", cap.prop, err)
 			continue
 		}
 		props, err := resp.CapabilityData.Data.TPMProperties()
 		if err != nil {
+			logf("GetCapability %v: %v", cap.prop, err)
 			continue
 		}
 		if len(props.TPMProperty) == 0 {
@@ -85,6 +144,7 @@ func info() *tailcfg.TPMInfo {
 		}
 		cap.apply(info, props.TPMProperty[0].Value)
 	}
+	logf("successfully read all properties")
 	return info
 }
 
@@ -185,8 +245,11 @@ func (s *tpmStore) WriteState(k ipn.StateKey, bs []byte) error {
 	if bytes.Equal(s.cache[k], bs) {
 		return nil
 	}
-	s.cache[k] = bytes.Clone(bs)
-
+	if bs == nil {
+		delete(s.cache, k)
+	} else {
+		s.cache[k] = bytes.Clone(bs)
+	}
 	return s.writeSealed()
 }
 
@@ -356,6 +419,9 @@ func tpmSeal(logf logger.Logf, data []byte) (*tpmSealedData, error) {
 					FixedTPM:     true,
 					FixedParent:  true,
 					UserWithAuth: true,
+					// We don't set an authorization policy on this key, so DA
+					// isn't helpful.
+					NoDA: true,
 				},
 			}),
 		}

@@ -1,20 +1,18 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package varz
 
 import (
-	"bytes"
 	"expvar"
 	"net/http/httptest"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
 	"tailscale.com/metrics"
+	"tailscale.com/syncs"
 	"tailscale.com/tstest"
-	"tailscale.com/util/racebuild"
 	"tailscale.com/version"
 )
 
@@ -112,7 +110,6 @@ func TestVarzHandler(t *testing.T) {
 			&metrics.Set{
 				Map: *(func() *expvar.Map {
 					m := new(expvar.Map)
-					m.Init()
 					m.Add("foo", 1)
 					m.Add("bar", 2)
 					return m
@@ -126,7 +123,6 @@ func TestVarzHandler(t *testing.T) {
 			&metrics.Set{
 				Map: *(func() *expvar.Map {
 					m := new(expvar.Map)
-					m.Init()
 					m.Add("foo", 1)
 					m.Add("bar", 2)
 					return m
@@ -139,7 +135,6 @@ func TestVarzHandler(t *testing.T) {
 			"api_status_code",
 			func() *expvar.Map {
 				m := new(expvar.Map)
-				m.Init()
 				m.Add("2xx", 100)
 				m.Add("5xx", 2)
 				return m
@@ -171,13 +166,46 @@ func TestVarzHandler(t *testing.T) {
 				Label: "label",
 				Map: *(func() *expvar.Map {
 					m := new(expvar.Map)
-					m.Init()
 					m.Add("foo", 1)
 					m.Add("bar", 2)
 					return m
 				})(),
 			},
 			"# TYPE m counter\nm{label=\"bar\"} 2\nm{label=\"foo\"} 1\n",
+		},
+		{
+			"metrics_label_map_float",
+			"float_map",
+			func() *expvar.Map {
+				m := new(expvar.Map)
+				f := new(expvar.Float)
+				f.Set(1.5)
+				m.Set("a", f)
+				return m
+			}(),
+			"float_map_a 1.5\n",
+		},
+		{
+			"metrics_label_map_int",
+			"int_map",
+			func() *expvar.Map {
+				m := new(expvar.Map)
+				f := new(expvar.Int)
+				f.Set(55)
+				m.Set("a", f)
+				return m
+			}(),
+			"int_map_a 55\n",
+		},
+		{
+			"metrics_label_map_string",
+			"string_map",
+			func() *expvar.Map {
+				m := new(expvar.Map)
+				m.Set("a", new(expvar.String))
+				return m
+			}(),
+			"# skipping \"string_map\" expvar map key \"a\" with unknown value type *expvar.String\n",
 		},
 		{
 			"metrics_label_map_untyped",
@@ -218,7 +246,6 @@ func TestVarzHandler(t *testing.T) {
 			"counter_labelmap_keyname_m",
 			func() *expvar.Map {
 				m := new(expvar.Map)
-				m.Init()
 				m.Add("foo", 1)
 				m.Add("bar", 2)
 				return m
@@ -283,6 +310,26 @@ foo_foo_a 1
 foo_foo_b 1
 `) + "\n",
 		},
+		{
+			"metrics_sharded_int",
+			"counter_api_status_code",
+			func() *syncs.ShardedInt {
+				m := syncs.NewShardedInt()
+				m.Add(40)
+				m.Add(2)
+				return m
+			}(),
+			strings.TrimSpace(`
+# TYPE api_status_code counter
+api_status_code 42
+			`) + "\n",
+		},
+		{
+			"string_expvar_is_not_exported",
+			"foo_string",
+			new(expvar.String),
+			"# skipping expvar \"foo_string\" (Go type *expvar.String) with undeclared Prometheus type\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -290,7 +337,7 @@ foo_foo_b 1
 				f(expvar.KeyValue{Key: tt.k, Value: tt.v})
 			})
 			rec := httptest.NewRecorder()
-			Handler(rec, httptest.NewRequest("GET", "/", nil))
+			ExpvarDoHandler(expvarDo)(rec, httptest.NewRequest("GET", "/", nil))
 			if got := rec.Body.Bytes(); string(got) != tt.want {
 				t.Errorf("mismatch\n got: %q\n%s\nwant: %q\n%s\n", got, got, tt.want, tt.want)
 			}
@@ -403,7 +450,7 @@ func TestVarzHandlerSorting(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
-	Handler(rec, req)
+	ExpvarDoHandler(expvarDo)(rec, req)
 	got := rec.Body.Bytes()
 	const want = "# TYPE aa gauge\naa 0\n# TYPE zz counter\nzz 0\n"
 	if string(got) != want {
@@ -418,78 +465,6 @@ func TestVarzHandlerSorting(t *testing.T) {
 		}))
 		if max := 13; allocs > max {
 			t.Errorf("allocs = %v; want max %v", allocs, max)
-		}
-	}
-}
-
-func TestWriteMemestats(t *testing.T) {
-	memstats := &runtime.MemStats{
-		Alloc:        1,
-		TotalAlloc:   2,
-		Sys:          3,
-		Lookups:      4,
-		Mallocs:      5,
-		Frees:        6,
-		HeapAlloc:    7,
-		HeapSys:      8,
-		HeapIdle:     9,
-		HeapInuse:    10,
-		HeapReleased: 11,
-		HeapObjects:  12,
-		StackInuse:   13,
-		StackSys:     14,
-		MSpanInuse:   15,
-		MSpanSys:     16,
-		MCacheInuse:  17,
-		MCacheSys:    18,
-		BuckHashSys:  19,
-		GCSys:        20,
-		OtherSys:     21,
-		NextGC:       22,
-		LastGC:       23,
-		PauseTotalNs: 24,
-		// PauseNs:       [256]int64{},
-		NumGC:         26,
-		NumForcedGC:   27,
-		GCCPUFraction: 0.28,
-	}
-
-	var buf bytes.Buffer
-	writeMemstats(&buf, memstats)
-	lines := strings.Split(buf.String(), "\n")
-
-	checkFor := func(name, typ, value string) {
-		var foundType, foundValue bool
-		for _, line := range lines {
-			if line == "memstats_"+name+" "+value {
-				foundValue = true
-			}
-			if line == "# TYPE memstats_"+name+" "+typ {
-				foundType = true
-			}
-			if foundValue && foundType {
-				return
-			}
-		}
-		t.Errorf("memstats_%s foundType=%v foundValue=%v", name, foundType, foundValue)
-	}
-
-	t.Logf("memstats:\n %s", buf.String())
-
-	checkFor("heap_alloc", "gauge", "7")
-	checkFor("total_alloc", "counter", "2")
-	checkFor("sys", "gauge", "3")
-	checkFor("mallocs", "counter", "5")
-	checkFor("frees", "counter", "6")
-	checkFor("num_gc", "counter", "26")
-	checkFor("gc_cpu_fraction", "gauge", "0.28")
-
-	if !racebuild.On {
-		if allocs := testing.AllocsPerRun(1000, func() {
-			buf.Reset()
-			writeMemstats(&buf, memstats)
-		}); allocs != 1 {
-			t.Errorf("allocs = %v; want max %v", allocs, 1)
 		}
 	}
 }

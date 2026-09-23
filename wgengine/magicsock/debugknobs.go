@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !ios && !js
@@ -62,12 +62,10 @@ var (
 	//
 	//lint:ignore U1000 used on Linux/Darwin only
 	debugPMTUD = envknob.RegisterBool("TS_DEBUG_PMTUD")
-	// debugAssumeUDPRelayCapable forces magicsock to assume that all peers are
-	// UDP relay capable clients and servers. This will eventually be replaced
-	// by a [tailcfg.CapabilityVersion] comparison. It enables early testing of
-	// the UDP relay feature before we have established related
-	// [tailcfg.CapabilityVersion]'s.
-	debugAssumeUDPRelayCapable = envknob.RegisterBool("TS_DEBUG_ASSUME_UDP_RELAY_CAPABLE")
+	// debugNeverDirectUDP disables the use of direct UDP connections by
+	// suppressing/dropping inbound/outbound [disco.Ping] messages, forcing
+	// all peer communication over DERP or peer relay.
+	debugNeverDirectUDP = envknob.RegisterBool("TS_DEBUG_NEVER_DIRECT_UDP")
 	// Hey you! Adding a new debugknob? Make sure to stub it out in the
 	// debugknobs_stubs.go file too.
 )

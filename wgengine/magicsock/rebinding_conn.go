@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package magicsock
@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sync"
 	"sync/atomic"
 	"syscall"
 
-	"golang.org/x/net/ipv6"
+	"tailscale.com/control/controlknobs"
+	"tailscale.com/net/batching"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/packet"
+	"tailscale.com/syncs"
 	"tailscale.com/types/nettype"
 )
 
@@ -30,7 +31,7 @@ type RebindingUDPConn struct {
 	// Neither is expected to be nil, sockets are bound on creation.
 	pconnAtomic atomic.Pointer[nettype.PacketConn]
 
-	mu    sync.Mutex // held while changing pconn (and pconnAtomic)
+	mu    syncs.Mutex // held while changing pconn (and pconnAtomic)
 	pconn nettype.PacketConn
 	port  uint16
 }
@@ -40,9 +41,9 @@ type RebindingUDPConn struct {
 // nettype.PacketConn to a batchingConn when appropriate. This upgrade is
 // intentionally pushed closest to where read/write ops occur in order to avoid
 // disrupting surrounding code that assumes nettype.PacketConn is a
-// *net.UDPConn.
-func (c *RebindingUDPConn) setConnLocked(p nettype.PacketConn, network string, batchSize int) {
-	upc := tryUpgradeToBatchingConn(p, network, batchSize)
+// *net.UDPConn. knobs may be nil.
+func (c *RebindingUDPConn) setConnLocked(p nettype.PacketConn, network string, knobs *controlknobs.Knobs) {
+	upc := batching.TryUpgradeToConn(p, network, "magicsock_udp_rxq_overflows", knobs)
 	c.pconn = upc
 	c.pconnAtomic.Store(&upc)
 	c.port = uint16(c.localAddrLocked().Port)
@@ -72,25 +73,27 @@ func (c *RebindingUDPConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, e
 	return c.readFromWithInitPconn(*c.pconnAtomic.Load(), b)
 }
 
-// WriteBatchTo writes buffs to addr.
-func (c *RebindingUDPConn) WriteBatchTo(buffs [][]byte, addr epAddr, offset int) error {
+// WriteWireGuardBatchTo writes buffs to addr. It serves primarily as an alias
+// for [batching.Conn.WriteBatchTo], with fallback to single packet operations
+// if c.pconn is not a [batching.Conn].
+//
+// WriteWireGuardBatchTo assumes buffs are WireGuard packets, which is notable
+// for Geneve encapsulation: Geneve protocol is set to [packet.GeneveProtocolWireGuard],
+// and the control bit is left unset.
+func (c *RebindingUDPConn) WriteWireGuardBatchTo(buffs [][]byte, addr epAddr, offset int) error {
 	if offset != packet.GeneveFixedHeaderLength {
-		return fmt.Errorf("RebindingUDPConn.WriteBatchTo: [unexpected] offset (%d) != Geneve header length (%d)", offset, packet.GeneveFixedHeaderLength)
+		return fmt.Errorf("RebindingUDPConn.WriteWireGuardBatchTo: [unexpected] offset (%d) != Geneve header length (%d)", offset, packet.GeneveFixedHeaderLength)
+	}
+	gh := packet.GeneveHeader{
+		Protocol: packet.GeneveProtocolWireGuard,
+		VNI:      addr.vni,
 	}
 	for {
 		pconn := *c.pconnAtomic.Load()
-		b, ok := pconn.(batchingConn)
+		b, ok := pconn.(batching.Conn)
 		if !ok {
-			vniIsSet := addr.vni.isSet()
-			var gh packet.GeneveHeader
-			if vniIsSet {
-				gh = packet.GeneveHeader{
-					Protocol: packet.GeneveProtocolWireGuard,
-					VNI:      addr.vni.get(),
-				}
-			}
 			for _, buf := range buffs {
-				if vniIsSet {
+				if gh.VNI.IsSet() {
 					gh.Encode(buf)
 				} else {
 					buf = buf[offset:]
@@ -102,7 +105,7 @@ func (c *RebindingUDPConn) WriteBatchTo(buffs [][]byte, addr epAddr, offset int)
 			}
 			return nil
 		}
-		err := b.WriteBatchTo(buffs, addr, offset)
+		err := b.WriteBatchTo(buffs, addr.ap, gh, offset)
 		if err != nil {
 			if pconn != c.currentConn() {
 				continue
@@ -113,23 +116,23 @@ func (c *RebindingUDPConn) WriteBatchTo(buffs [][]byte, addr epAddr, offset int)
 	}
 }
 
-// ReadBatch reads messages from c into msgs. It returns the number of messages
-// the caller should evaluate for nonzero len, as a zero len message may fall
-// on either side of a nonzero.
-func (c *RebindingUDPConn) ReadBatch(msgs []ipv6.Message, flags int) (int, error) {
+// ReadBatch is an alias for [batching.Conn.ReadBatch] with fallback to single
+// packet operations if c.pconn is not a [batching.Conn].
+func (c *RebindingUDPConn) ReadBatch(slab []byte, batchingPackets []batching.ReceivedPacket) (int, error) {
 	for {
 		pconn := *c.pconnAtomic.Load()
-		b, ok := pconn.(batchingConn)
+		b, ok := pconn.(batching.Conn)
 		if !ok {
-			n, ap, err := c.readFromWithInitPconn(pconn, msgs[0].Buffers[0])
+			n, ap, err := c.readFromWithInitPconn(pconn, slab)
 			if err == nil {
-				msgs[0].N = n
-				msgs[0].Addr = net.UDPAddrFromAddrPort(netaddr.Unmap(ap))
+				batchingPackets[0].Offset = 0
+				batchingPackets[0].Size = n
+				batchingPackets[0].Source = netaddr.Unmap(ap)
 				return 1, nil
 			}
 			return 0, err
 		}
-		n, err := b.ReadBatch(msgs, flags)
+		n, err := b.ReadBatch(slab, batchingPackets)
 		if err != nil && pconn != c.currentConn() {
 			continue
 		}

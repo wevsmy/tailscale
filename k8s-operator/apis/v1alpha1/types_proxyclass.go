@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !plan9
@@ -264,6 +264,7 @@ type Pod struct {
 	// +optional
 	TailscaleContainer *Container `json:"tailscaleContainer,omitempty"`
 	// Configuration for the proxy init container that enables forwarding.
+	// Not valid to apply to ProxyGroups of type "kube-apiserver".
 	// +optional
 	TailscaleInitContainer *Container `json:"tailscaleInitContainer,omitempty"`
 	// Proxy Pod's security context.
@@ -297,6 +298,22 @@ type Pod struct {
 	// https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
 	// +optional
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+	// PriorityClassName for the proxy Pod.
+	// By default Tailscale Kubernetes operator does not apply any priority class.
+	// https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#scheduling
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+	// DNSPolicy defines how DNS will be configured for the proxy Pod.
+	// By default the Tailscale Kubernetes Operator does not set a DNS policy (uses cluster default).
+	// https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#pod-s-dns-policy
+	// +kubebuilder:validation:Enum=ClusterFirstWithHostNet;ClusterFirst;Default;None
+	// +optional
+	DNSPolicy *corev1.DNSPolicy `json:"dnsPolicy,omitempty"`
+	// DNSConfig defines DNS parameters for the proxy Pod in addition to those generated from DNSPolicy.
+	// When DNSPolicy is set to "None", DNSConfig must be specified.
+	// https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#pod-dns-config
+	// +optional
+	DNSConfig *corev1.PodDNSConfig `json:"dnsConfig,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="!(has(self.serviceMonitor) && self.serviceMonitor.enable  && !self.enable)",message="ServiceMonitor can only be enabled if metrics are enabled"
@@ -335,12 +352,12 @@ type ServiceMonitor struct {
 
 type Labels map[string]LabelValue
 
-func (l Labels) Parse() map[string]string {
-	if l == nil {
+func (lb Labels) Parse() map[string]string {
+	if lb == nil {
 		return nil
 	}
-	m := make(map[string]string, len(l))
-	for k, v := range l {
+	m := make(map[string]string, len(lb))
+	for k, v := range lb {
 		m[k] = string(v)
 	}
 	return m
@@ -364,12 +381,21 @@ type Container struct {
 	// the future.
 	// +optional
 	Env []Env `json:"env,omitempty"`
-	// Container image name. By default images are pulled from
-	// docker.io/tailscale/tailscale, but the official images are also
-	// available at ghcr.io/tailscale/tailscale. Specifying image name here
-	// will override any proxy image values specified via the Kubernetes
-	// operator's Helm chart values or PROXY_IMAGE env var in the operator
-	// Deployment.
+	// Container image name. By default images are pulled from docker.io/tailscale,
+	// but the official images are also available at ghcr.io/tailscale.
+	//
+	// For all uses except on ProxyGroups of type "kube-apiserver", this image must
+	// be either tailscale/tailscale, or an equivalent mirror of that image.
+	// To apply to ProxyGroups of type "kube-apiserver", this image must be
+	// tailscale/k8s-proxy or a mirror of that image.
+	//
+	// For "tailscale/tailscale"-based proxies, specifying image name here will
+	// override any proxy image values specified via the Kubernetes operator's
+	// Helm chart values or PROXY_IMAGE env var in the operator Deployment.
+	// For "tailscale/k8s-proxy"-based proxies, there is currently no way to
+	// configure your own default, and this field is the only way to use a
+	// custom image.
+	//
 	// https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#image
 	// +optional
 	Image string `json:"image,omitempty"`
